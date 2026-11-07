@@ -22,6 +22,7 @@ from .common.models import Outcome, PubState, ScriptJSON, State, TrendPayload
 from .common.queues import MAX_DELIVERIES, Q_DISCOVER, Q_PUBLISH, Q_RENDER, Q_SCRIPT, Message, poison
 from .common.repo import PACIFIC, Repo, StaleState, iso, now, quota_day
 from .common.runtime import Runtime
+from .common.secrets import MissingSecret
 
 log = logging.getLogger(__name__)
 
@@ -388,6 +389,13 @@ class Pipeline:
             log.error("P1: %s credential failed: %s", platform, exc)
             self._pub_error(cid, platform, exc)
             raise Defer(str(exc), 1800) from exc
+        except MissingSecret as exc:
+            fix = "run bootstrap-youtube" if platform == "YOUTUBE" else "store ig-access-token in Key Vault"
+            reason = PipelineError(f"{platform.title()} is not connected yet ({exc}); {fix}")
+            reason.error_class = "not_connected"
+            log.error("P1: %s", reason)
+            self._pub_error(cid, platform, reason)
+            raise Defer(str(reason), 1800) from exc
         except Permanent as exc:
             self._pub_error(cid, platform, exc, failed=True)
             self.finalize(cid)

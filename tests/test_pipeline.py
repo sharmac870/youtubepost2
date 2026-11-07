@@ -265,3 +265,25 @@ def test_sweep_backfills_previews_for_older_drafts(tmp_path):
     assert pipeline.sweep()["previews"] == 0                     # not re-queued within the hour
     pipeline.work(ALL_QUEUES)
     assert all(i.get("media") for i in drafts(rt))
+
+
+def test_missing_platform_secret_waits_with_a_clear_reason(pipeline, rt, services):
+    from ytp.common.secrets import MissingSecret
+
+    def missing():
+        raise MissingSecret("secret 'ig-access-token' is not set")
+    pipeline.services.instagram = missing
+    cid = run_to_approval(pipeline, rt)[0]["PartitionKey"]
+    pipeline.approve(cid, "r")
+    pipeline.work(ALL_QUEUES)
+    pub = rt.repo.pub(cid, "INSTAGRAM")
+    assert "not connected yet" in pub["last_error"] and pub["error_class"] == "not_connected"
+    assert rt.repo.pub(cid, "YOUTUBE")["state"] == PubState.LIVE
+    assert rt.queues.depth(poison("q-publish-instagram")) == 0
+
+
+def test_secret_values_lose_pasted_quotes(monkeypatch):
+    from ytp.common.secrets import Secrets
+
+    monkeypatch.setenv("IG_ACCESS_TOKEN", ' "IGAAtoken"\n')
+    assert Secrets().get("ig-access-token") == "IGAAtoken"

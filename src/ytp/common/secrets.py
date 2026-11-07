@@ -44,7 +44,7 @@ class Secrets:
                 value = ""
         else:
             value = os.environ.get(name.upper().replace("-", "_"), "")
-        value = value.strip()
+        value = value.strip().strip("\"'").strip()   # pasted tokens often carry quotes or newlines
         if not value and required:
             raise MissingSecret(f"secret {name!r} is not set")
         if value:
