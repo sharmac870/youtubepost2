@@ -48,19 +48,25 @@ async def security(request: Request, call_next):
         rt = runtime()
         user = current_user(request, rt)
         if user is None:
+            log.warning("refused %s %s: signed-in user %r (id %r) is not in ALLOWED_USERS", request.method, path,
+                        request.headers.get("x-ms-client-principal-name"), request.headers.get("x-ms-client-principal-id"))
             return JSONResponse({"error": "not allowed"}, status_code=403)
         request.state.user = user
         if request.method not in ("GET", "HEAD", "OPTIONS"):
-            origin = request.headers.get("origin")
-            host = request.headers.get("x-forwarded-host") or request.headers.get("host")
-            if request.headers.get("x-requested-with") != "ytp" or (origin and origin.split("://", 1)[-1] != host):
+            # CSRF: a custom header can't be sent cross-site without a CORS preflight, which this app never
+            # allows; browsers also say where a request came from in Sec-Fetch-Site. The Host header is not
+            # compared, because behind Container Apps ingress and built-in auth it is not the public name.
+            site = request.headers.get("sec-fetch-site", "same-origin")
+            if request.headers.get("x-requested-with") != "ytp" or site not in ("same-origin", "none"):
+                log.warning("refused %s %s: x-requested-with=%r sec-fetch-site=%r", request.method, path,
+                            request.headers.get("x-requested-with"), site)
                 return JSONResponse({"error": "cross-site request refused"}, status_code=403)
     response = await call_next(request)
     response.headers.update({
         "Content-Security-Policy": "default-src 'self'; img-src 'self' data:; media-src 'self'; style-src 'self'; "
                                    "script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; "
                                    "form-action 'self'",
-        "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer", "X-Frame-Options": "DENY",
+        "X-Content-Type-Options": "nosniff", "Referrer-Policy": "same-origin", "X-Frame-Options": "DENY",
         "Cache-Control": response.headers.get("Cache-Control", "no-store"),
     })
     return response

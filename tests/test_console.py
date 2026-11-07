@@ -32,6 +32,12 @@ def test_allowed_user_and_csrf(tmp_path, monkeypatch):
     assert r.status_code == 200 and r.headers["content-security-policy"].startswith("default-src 'self'")
     assert client.post("/api/discover", headers=who).status_code == 403      # no CSRF header
     assert client.post("/api/discover", headers={**who, "x-requested-with": "ytp"}).status_code == 200
+    # Behind ingress the Host header is internal; same-origin browser requests must still pass.
+    same = {**who, "x-requested-with": "ytp", "origin": "https://console.example", "host": "localhost:8000",
+            "sec-fetch-site": "same-origin"}
+    assert client.post("/api/discover", headers=same).status_code == 200
+    cross = {**same, "sec-fetch-site": "cross-site"}
+    assert client.post("/api/discover", headers=cross).status_code == 403
 
 
 def test_review_flow_through_the_api(tmp_path, monkeypatch):

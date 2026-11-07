@@ -523,10 +523,11 @@ class Pipeline:
         row = self.repo.channel_snapshot()
         if row and not force and row.get("fetched_at", "") > iso(now() - timedelta(hours=self.s.channel_stats_every_hours)):
             return False
-        stats = self.services.channel()
+        stats = None
         try:
+            stats = self.services.channel()
             snap = stats.snapshot(self.s.yt_channel_handle)
-        except (PipelineError, ValueError) as exc:
+        except Exception as exc:  # noqa: BLE001 - analytics must never stop the sweep
             log.warning("channel analytics refresh failed: %s", exc)
             return False
         finally:
