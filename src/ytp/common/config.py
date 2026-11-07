@@ -37,6 +37,16 @@ class Settings(BaseSettings):
     max_results_per_category: int = Field(25, ge=1, le=50)
     deny_channel_ids: Csv = []
     news_context: bool = True            # Google News RSS headlines as sources for factual claims
+    # Of the top_n_topics per run, how many come from the news-story hierarchy (cyber, tech, business,
+    # breaking) instead of the YouTube chart. 0 turns news-led stories off.
+    news_topics_per_run: int = Field(1, ge=0, le=10)
+    news_niches: Csv = ["cyber", "tech", "business", "viral"]
+    news_lookback_hours: int = Field(36, ge=6, le=168)
+    fetch_articles: bool = True          # read the top article's text for facts (best effort)
+
+    # Channel analytics (read-only, API key): refreshed by the sweep job at most this often
+    yt_channel_handle: str = "@chansharma870"
+    channel_stats_every_hours: int = Field(3, ge=1, le=48)
 
     # Claude. Haiku is about 5x cheaper than Sonnet and writes 60-second scripts well; switch with one env var.
     anthropic_model: str = "claude-haiku-5-5"
@@ -89,7 +99,7 @@ class Settings(BaseSettings):
     console_dev_auth: bool = False       # local development only: skip sign-in
 
     @field_validator("category_allowlist", "auto_approve_categories", "allowed_users", "admin_users",
-                     "deny_channel_ids", "deny_topics", "platforms", mode="before")
+                     "deny_channel_ids", "deny_topics", "platforms", "news_niches", mode="before")
     @classmethod
     def _split(cls, value):
         if isinstance(value, str):

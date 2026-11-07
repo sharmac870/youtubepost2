@@ -184,7 +184,37 @@ async function renderDashboard(main) {
         h("td", { class: "num" }, nf.format(t.platforms.YOUTUBE?.views || 0)),
         h("td", { class: "num" }, nf.format(t.platforms.INSTAGRAM?.views || 0))))))) : h("div", { class: "empty" }, "Views appear once posts are live (refreshed every 30 minutes)."));
 
-  main.replaceChildren(toolbar, kpis, h("div", { class: "grid two" }, chartCard, catCard), h("div", { class: "grid two", style: "margin-top:16px" }, top, funnel));
+  main.replaceChildren(toolbar, kpis, h("div", { class: "grid two" }, chartCard, catCard), h("div", { class: "grid two", style: "margin-top:16px" }, top, funnel),
+    await channelSection());
+}
+
+// Whole-channel analytics: every upload on the channel, not only this pipeline's. Refreshed by the sweep job.
+async function channelSection() {
+  let c;
+  try { c = await api(`/api/channel?days=${state.days}`); } catch (e) { return h("div", { class: "card empty", style: "margin-top:16px" }, `Channel analytics unavailable: ${e.message}`); }
+  if (!c.ready) return h("div", { class: "card empty", style: "margin-top:16px" }, "Channel analytics appear after the first sweep run with a YouTube API key (every 3 hours).");
+  const ch = c.channel || {};
+  const tile = (label, value, sub) => h("div", { class: "card tile" }, h("div", { class: "label" }, label), h("div", { class: "value" }, value), sub ? h("div", { class: "sub" }, sub) : null);
+  const calendar = c.per_day.map((d) => d.date);
+  const perDay = Object.fromEntries(c.per_day.map((d) => [d.date, d.count]));
+  const chart = h("div", { class: "card" }, h("div", { class: "card-head" }, h("h2", {}, "Channel uploads per day"),
+    h("div", { class: "legend" }, h("span", { class: "key" }, h("span", { class: "swatch yt" }), "All uploads"))),
+    barChart({ calendar, days: c.days, posts_per_day: { YOUTUBE: perDay, INSTAGRAM: {} } }, true));
+  const top = h("div", { class: "card" }, h("h2", {}, "Most viewed uploads"),
+    c.top.length ? h("div", { class: "table-wrap" }, h("table", {},
+      h("thead", {}, h("tr", {}, h("th", {}, "Video"), h("th", {}, "Type"), h("th", { class: "num" }, "Views"), h("th", { class: "num" }, "Likes"))),
+      h("tbody", {}, c.top.map((v) => h("tr", {},
+        h("td", { class: "title-cell" }, h("a", { href: v.url, target: "_blank", rel: "noopener noreferrer" }, v.title), h("div", { class: "muted" }, when(v.published_at))),
+        h("td", {}, v.is_short ? "Short" : "Video"),
+        h("td", { class: "num" }, nf.format(v.views)), h("td", { class: "num" }, nf.format(v.likes))))))) : h("div", { class: "empty" }, "No uploads in this period."));
+  return h("section", { style: "margin-top:24px" },
+    h("div", { class: "toolbar" }, h("h1", {}, `Channel: ${ch.title || ""}`), h("span", { class: "muted" }, `${ch.handle || ""} · updated ${ago(c.fetched_at)}`)),
+    h("div", { class: "grid kpis" },
+      tile("Subscribers", ch.subscribers == null ? "hidden" : compact.format(ch.subscribers), `${compact.format(ch.total_views || 0)} views all time`),
+      tile("Uploads", nf.format(c.published), `${c.shorts} Shorts · ${c.long_videos} videos, last ${c.days} days`),
+      tile("Views on these uploads", compact.format(c.views), `${nf.format(c.average_views)} on average`),
+      tile("Likes and comments", compact.format(c.likes + c.comments), `${nf.format(c.likes)} likes · ${nf.format(c.comments)} comments`)),
+    h("div", { class: "grid two", style: "align-items:start" }, chart, top));
 }
 
 function postsTable(s) {
@@ -194,7 +224,7 @@ function postsTable(s) {
       h("td", { class: "num" }, String(s.posts_per_day.YOUTUBE[d] || 0)), h("td", { class: "num" }, String(s.posts_per_day.INSTAGRAM[d] || 0)))))));
 }
 
-function barChart(s) {
+function barChart(s, single = false) {
   const W = 720, H = 240, L = 28, B = 22, T = 8;
   const days = s.calendar;
   const yt = days.map((d) => s.posts_per_day.YOUTUBE[d] || 0);
@@ -205,7 +235,7 @@ function barChart(s) {
   const plotW = W - L, plotH = H - B - T;
   const slot = plotW / days.length, bw = Math.max(2, Math.min(28, slot * 0.62));
   const y = (v) => T + plotH - (v / top) * plotH;
-  const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": `Posts per day for the last ${s.days} days, YouTube and Instagram stacked` });
+  const root = svg("svg", { viewBox: `0 0 ${W} ${H}`, role: "img", "aria-label": single ? `Channel uploads per day for the last ${s.days} days` : `Posts per day for the last ${s.days} days, YouTube and Instagram stacked` });
   const grid = svg("g", { class: "axis" });
   for (let v = 0; v <= top; v += step) {
     grid.append(svg("line", { class: "gridline", x1: L, x2: W, y1: y(v), y2: y(v) }));
@@ -236,7 +266,7 @@ function barChart(s) {
     g.append(...[seg(0, yt[i], "bar-yt", !ig[i]), seg(yt[i], yt[i] + ig[i], "bar-ig", true)].filter(Boolean));
     const hit = svg("rect", { class: "hit", x: L + slot * i, y: T, width: slot, height: plotH });
     hit.addEventListener("mousemove", (e) => showTip(e, new Date(d + "T00:00:00").toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short" }),
-      [["yt", "YouTube", yt[i]], ["ig", "Instagram", ig[i]]]));
+      single ? [["yt", "Uploads", yt[i]]] : [["yt", "YouTube", yt[i]], ["ig", "Instagram", ig[i]]]));
     hit.addEventListener("mouseleave", hideTip);
     bars.append(g, hit);
   });
@@ -264,11 +294,41 @@ async function discoverNow() {
 
 // ----- review -----
 
+// "Create from theme" (from the YoutubePosts Studio): the worker finds recent coverage of the theme and
+// writes a draft, which then waits here for approval like any other.
+function openThemeForm() {
+  const form = h("form", { onsubmit: async (e) => {
+    e.preventDefault();
+    const fd = new FormData(form);
+    const terms = String(fd.get("terms") || "").split(",").map((t) => t.trim()).filter(Boolean).slice(0, 4);
+    try {
+      await api("/api/create", { method: "POST", body: { theme: fd.get("theme"), terms, hours: Number(fd.get("hours")) } });
+      toast("Looking for coverage now. The draft appears in Review within a few minutes.");
+      closeDrawer();
+    } catch (err) { toast(`Couldn't start: ${err.message}`); }
+  } },
+    h("h1", { id: "drawer-title" }, "Create from theme"),
+    h("p", { class: "muted" }, "Describe what the Short should be about. Recent news on it is gathered for facts and sources, then Claude writes an original script. It still goes through the policy check and your approval before anything is posted."),
+    h("div", { class: "field" }, h("label", { for: "f-theme" }, "Theme"),
+      h("input", { type: "text", id: "f-theme", name: "theme", required: true, minlength: 3, maxlength: 200, placeholder: "e.g. Why UPI Lite is suddenly everywhere" })),
+    h("div", { class: "field" }, h("label", { for: "f-terms" }, "News search terms (optional, comma separated, up to 4)"),
+      h("input", { type: "text", id: "f-terms", name: "terms", maxlength: 320, placeholder: "UPI Lite, NPCI" })),
+    h("div", { class: "field" }, h("label", { for: "f-hours" }, "Look back"),
+      h("select", { id: "f-hours", name: "hours" }, [["24", "24 hours"], ["48", "2 days"], ["168", "7 days"]].map(([v, l]) =>
+        h("option", { value: v, selected: v === "48" || null }, l)))),
+    h("div", { class: "actions" }, h("button", { class: "btn primary", type: "submit" }, "Create draft"),
+      h("button", { class: "btn", type: "button", onclick: closeDrawer }, "Cancel")));
+  $("#drawer-body").replaceChildren(form);
+  $("#drawer").hidden = false;
+  $("#f-theme").focus();
+}
+
 async function renderReview(main) {
   const r = await api("/api/items?state=AWAITING_APPROVAL,EXPIRED&limit=50");
   const head = h("div", { class: "toolbar" }, h("h1", {}, "Review"),
     h("span", { class: "muted" }, "Approve to render and publish. Drafts expire 6 hours after they're written; expired ones can still be approved."),
-    h("div", { class: "spacer" }), h("button", { class: "btn", onclick: discoverNow }, "Find trends now"));
+    h("div", { class: "spacer" }), h("button", { class: "btn", onclick: openThemeForm }, "Create from theme"),
+    h("button", { class: "btn", onclick: discoverNow }, "Find trends now"));
   if (!r.items.length) {
     main.replaceChildren(head, h("div", { class: "card empty" }, "Nothing waiting for review. New drafts arrive after each discovery run."));
     return;
@@ -293,7 +353,7 @@ function reviewCard(d) {
       h("h2", {}, sc.title || it.title),
       h("div", { class: "meta" }, statePill(it.state), pill(it.category || "Uncategorised", ""),
         it.state === "AWAITING_APPROVAL" ? pill(`expires ${ago(it.expires_at)}`, "warning") : null),
-      h("div", { class: "secondary" }, `Trending signal: “${trend.title || ""}” · ${compact.format(trend.view_count || 0)} views`),
+      h("div", { class: "secondary" }, signalText(trend)),
       (policy.reasons || []).length ? h("div", { class: "reasons" }, h("b", {}, "Why it needs review: "), policy.reasons.join("; ")) : null,
       h("ol", { class: "scenes" }, h("li", {}, h("b", {}, "Hook: "), sc.hook_text || ""),
         (sc.scenes || []).map((s) => h("li", {}, h("b", {}, `${s.on_screen_text}: `), s.narration)),
@@ -301,6 +361,12 @@ function reviewCard(d) {
       (sc.sources || []).length ? h("div", { class: "muted" }, "Sources: ", (sc.sources || []).map((u, i) => [i ? ", " : "", h("a", { href: u, target: "_blank", rel: "noopener noreferrer" }, new URL(u).hostname)])) : h("div", { class: "muted" }, "No sources cited."),
       actions));
   return card;
+}
+
+function signalText(t) {
+  if (t.origin === "theme") return `Your theme: “${t.theme || ""}” · story: “${t.title || ""}”`;
+  if (t.origin === "news") return `News story (${t.channel_title || "news"}): “${t.title || ""}” · ${Math.floor(t.velocity_score || 0)} outlets`;
+  return `Trending video: “${t.title || ""}” · ${compact.format(t.view_count || 0)} views`;
 }
 
 async function act(id, action, body, done) {
@@ -392,8 +458,7 @@ function itemView(d) {
       h("dl", { class: "kv" },
         h("dt", {}, "Created"), h("dd", {}, when(it.created_at)),
         h("dt", {}, "Approved by"), h("dd", {}, it.approved_by || "—"),
-        h("dt", {}, "Trending signal"), h("dd", {}, d.trend?.title || ""),
-        h("dt", {}, "Signal views"), h("dd", {}, nf.format(d.trend?.view_count || 0)),
+        h("dt", {}, "Signal"), h("dd", {}, signalText(d.trend || {})),
         h("dt", {}, "Policy"), h("dd", {}, d.policy ? `${d.policy.outcome}: ${(d.policy.reasons || []).join("; ")}` : "—"),
         h("dt", {}, "Video"), h("dd", {}, d.render ? `${d.render.seconds}s · ${(d.render.size / 1e6).toFixed(1)} MB · QA ${d.qa?.passed ? "passed" : (d.qa ? "failed: " + d.qa.problems.join("; ") : "pending")}` : "not rendered"),
         h("dt", {}, "Reference"), h("dd", {}, it.ref || "")),

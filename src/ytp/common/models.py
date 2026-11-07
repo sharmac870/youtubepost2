@@ -5,6 +5,7 @@ import re
 import unicodedata
 from datetime import datetime
 from enum import StrEnum
+from typing import Literal
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
@@ -82,16 +83,25 @@ def sanitize(text: str, limit: int) -> str:
 
 
 class TrendPayload(BaseModel):
-    source_video_id: str = Field(pattern=r"^[A-Za-z0-9_-]{11}$")
+    """The topic signal a draft is written from.
+
+    origin "youtube": a video on India's mostPopular chart (metadata only). "news": a story many outlets are
+    covering, found by the niche hierarchy. "theme": a story found for a theme the owner typed in the console.
+    """
+    origin: Literal["youtube", "news", "theme"] = "youtube"
+    source_video_id: str = Field("", pattern=r"^([A-Za-z0-9_-]{11})?$")
     title: str = Field(max_length=200)
     description: str = Field("", max_length=600)
     channel_id: str = Field("", max_length=40)
-    channel_title: str = Field(max_length=100)
-    category_id: str = Field(pattern=r"^\d{1,3}$")
-    view_count: int = Field(ge=0)
+    channel_title: str = Field("", max_length=100)
+    category_id: str = Field("25", pattern=r"^\d{1,3}$")
+    view_count: int = Field(0, ge=0)
     like_count: int = Field(0, ge=0)
     published_at: datetime
-    velocity_score: float = Field(ge=0)
+    velocity_score: float = Field(0, ge=0)
+    niche: str = Field("", max_length=40)
+    theme: str = Field("", max_length=200)         # what the owner asked for (origin "theme")
+    brief: str = Field("", max_length=4000)        # article excerpt, for facts; untrusted
     tags: list[str] = Field(default_factory=list, max_length=30)
     fingerprint: str = ""
     news: list[dict] = Field(default_factory=list, max_length=8)   # {title, source, url, published}
@@ -105,6 +115,16 @@ class TrendPayload(BaseModel):
     @classmethod
     def _clean_desc(cls, v):
         return sanitize(v, 600)
+
+    @field_validator("theme", mode="before")
+    @classmethod
+    def _clean_theme(cls, v):
+        return sanitize(v, 200)
+
+    @field_validator("brief", mode="before")
+    @classmethod
+    def _clean_brief(cls, v):
+        return sanitize(v, 4000)
 
     @field_validator("tags", mode="before")
     @classmethod

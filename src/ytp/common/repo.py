@@ -281,3 +281,11 @@ class Repo:
 
     def all_metrics(self) -> list[Entity]:
         return self.store.query(METRICS)
+
+    def channel_snapshot(self) -> dict | None:
+        row = self.store.get(METRICS, "_channel", "snapshot")
+        return json.loads(row["data"]) if row and row.get("data") else None
+
+    def save_channel_snapshot(self, snapshot: dict) -> None:
+        self.store.upsert(METRICS, {"PartitionKey": "_channel", "RowKey": "snapshot",
+                                    "data": json.dumps(snapshot, separators=(",", ":")), "updated_at": iso()})

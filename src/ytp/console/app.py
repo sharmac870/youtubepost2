@@ -379,6 +379,36 @@ def discover_now(u: dict = Depends(user)):
     return {"ok": True, "run_key": key}
 
 
+class Theme(BaseModel):
+    theme: str = Field(min_length=3, max_length=200)
+    terms: list[str] = Field(default_factory=list, max_length=4)
+    hours: int = Field(48, ge=6, le=168)
+
+
+@app.post("/api/create")
+def create_from_theme(body: Theme, u: dict = Depends(user)):
+    """Queues a one-off draft about the owner's theme. The worker finds coverage and writes the draft, which
+    then waits in Review like any other."""
+    terms = [t.strip()[:80] for t in body.terms if t.strip()]
+    rt = runtime()
+    key = f"theme-{now():%Y%m%d%H%M%S}"
+    rt.queues.send(Q_DISCOVER, {"run_key": key, "kind": "theme", "theme": body.theme.strip(), "terms": terms,
+                                "hours": body.hours, "actor": u["name"]})
+    return {"ok": True, "run_key": key}
+
+
+@app.get("/api/channel")
+def channel(days: int = 30, u: dict = Depends(user)):
+    from ..analytics.channel import summarise
+
+    if days not in (7, 30, 90):
+        raise HTTPException(422, "days must be 7, 30 or 90")
+    snap = runtime().repo.channel_snapshot()
+    if not snap:
+        return {"ready": False}
+    return {"ready": True, **summarise(snap, days)}
+
+
 @app.get("/api/health")
 def health(u: dict = Depends(user)):
     rt = runtime()

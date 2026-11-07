@@ -39,6 +39,8 @@ class Services:
     instagram: Callable[[], Any]
     qa: Callable[..., Any]
     extra: dict = field(default_factory=dict)
+    stories: Callable[[], Any] | None = None     # news-led StoryFinder; None builds the real one
+    channel: Callable[[], Any] | None = None     # ChannelStats for whole-channel analytics
 
 
 def default_services(rt: Runtime) -> Services:
@@ -63,9 +65,19 @@ def default_services(rt: Runtime) -> Services:
 
         return anthropic.Anthropic(api_key=sec.get("anthropic-api-key"), max_retries=3, timeout=120)
 
+    def stories():
+        from .discovery.stories import StoryFinder
+
+        return StoryFinder(fetch_articles=s.fetch_articles)
+
+    def channel():
+        from .analytics.channel import ChannelStats
+
+        return ChannelStats(sec.get("youtube-api-key"))
+
     return Services(trends=lambda: YouTubeTrends(sec.get("youtube-api-key")),
                     news=lambda: GoogleNews() if s.news_context else None, llm=llm, renderer=engine.render,
-                    youtube=youtube, instagram=instagram, qa=qa.check)
+                    youtube=youtube, instagram=instagram, qa=qa.check, stories=stories, channel=channel)
 
 
 class Pipeline:
@@ -103,10 +115,17 @@ class Pipeline:
     # ----- stage: discovery -----
 
     def discover(self, run_key: str, kind: str = "scheduled") -> dict:
+        return self._discovery().run(run_key, kind)
+
+    def _discovery(self):
         from .discovery.service import TrendDiscoveryService
 
-        service = TrendDiscoveryService(self.s, self.repo, self.services.trends(), self.services.news())
-        return service.run(run_key, kind)
+        stories = self.services.stories() if self.services.stories else None
+        return TrendDiscoveryService(self.s, self.repo, self.services.trends(), self.services.news(), stories=stories)
+
+    def discover_theme(self, body: dict) -> dict:
+        return self._discovery().run_theme(body["run_key"], body.get("theme", ""), list(body.get("terms") or []),
+                                           int(body.get("hours") or 48), body.get("actor", "console"))
 
     # ----- stage: script + policy -----
 
@@ -494,7 +513,27 @@ class Pipeline:
                 except StaleState:
                     pass
         refreshed = self.refresh_metrics()
-        return {"relayed": relayed, "expired": expired, "metrics": refreshed}
+        channel = self.refresh_channel()
+        return {"relayed": relayed, "expired": expired, "metrics": refreshed, "channel": channel}
+
+    def refresh_channel(self, force: bool = False) -> bool:
+        """Whole-channel analytics (all uploads, not only ours), at most every channel_stats_every_hours."""
+        if not self.services.channel or not self.s.yt_channel_handle:
+            return False
+        row = self.repo.channel_snapshot()
+        if row and not force and row.get("fetched_at", "") > iso(now() - timedelta(hours=self.s.channel_stats_every_hours)):
+            return False
+        stats = self.services.channel()
+        try:
+            snap = stats.snapshot(self.s.yt_channel_handle)
+        except (PipelineError, ValueError) as exc:
+            log.warning("channel analytics refresh failed: %s", exc)
+            return False
+        finally:
+            if getattr(stats, "units", 0):
+                self.repo.ledger_add(quota_day(), "youtube_units", stats.units)
+        self.repo.save_channel_snapshot(snap)
+        return True
 
     def refresh_metrics(self, days: int = 30) -> int:
         cutoff = iso(now() - timedelta(days=days))
@@ -532,7 +571,9 @@ class Pipeline:
     # ----- worker -----
 
     def dispatch(self, queue: str, body: dict) -> None:
-        if queue == Q_DISCOVER:
+        if queue == Q_DISCOVER and body.get("kind") == "theme":
+            self.discover_theme(body)
+        elif queue == Q_DISCOVER:
             self.discover(body.get("run_key") or f"manual-{int(time.time())}", body.get("kind", "manual"))
         elif queue == Q_SCRIPT:
             self.handle_script(body)

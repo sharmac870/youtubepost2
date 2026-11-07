@@ -33,6 +33,10 @@ def run_demo(rt: Runtime, runs: int = 3) -> dict:
                 rt.repo.save_pub(pub, published_at=iso(back))
             rt.repo.update_fields(item["PartitionKey"], {"published_at": iso(back), "created_at": iso(back - timedelta(hours=3))})
     pipeline.refresh_metrics(days=60)
+    pipeline.refresh_channel(force=True)
+    pipeline.discover_theme({"run_key": f"demo-theme-{stamp}", "theme": "Monsoon arrives early",
+                             "terms": ["monsoon Kerala"], "actor": "demo@local"})
+    pipeline.work(ALL_QUEUES)
     counts: dict[str, int] = {}
     for item in rt.repo.items():
         counts[item["state"]] = counts.get(item["state"], 0) + 1

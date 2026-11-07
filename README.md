@@ -18,6 +18,7 @@ velocity score,      LLM moderation                          checks           �
 ## What it does
 
 1. **Discovery** (Container Apps cron job, 06:00 / 12:00 / 18:00 / 00:00 IST): calls the official YouTube Data API `videos.list?chart=mostPopular&regionCode=IN` once per allow-listed category (Sports, Gaming, Entertainment, News, How-to, Science & Tech; never Music), scores by views per hour, drops deny-listed topics and anything covered in the last 7 days, and keeps the top 2. Recent Google News headlines on the topic are attached as citable sources. A run key (`2026-11-07-slot2`) makes double triggers harmless.
+   One of the two slots (`NEWS_TOPICS_PER_RUN`, 0 turns it off) goes to a **news-led story** instead, using the story picker from the earlier YoutubePosts project: it walks a niche hierarchy (cybersecurity, tech & AI, business, breaking; `NEWS_NICHES`), groups Google News and publisher-feed headlines into events with rare-word weighting, takes the first niche whose best story is covered by enough distinct outlets, and reads a capped excerpt of a directly linked article for facts. Only public https hosts are fetched (no IP literals, internal names or redirects to them).
 2. **Script** (event-driven worker): Claude writes an **original** commentary script as strict JSON (hook, 3–6 scenes, call to action, title, description, Instagram caption, hashtags, sources). Trending titles are treated as untrusted data inside delimited blocks; the model has no tools; output is validated and regenerated at most twice.
 3. **Policy gate**: deny-list rules (elections, communal, tragedies, crime, medical/financial advice, minors), URL and personal-data checks, unsourced claims, then a separate moderation call. Outcomes: **REJECT**, **REVIEW** (the default) or **APPROVE** (only for categories you switch to auto-approve later). Any error means REVIEW.
 4. **Review console**: you approve, edit (saved as a new version) or reject. Drafts expire after 6 hours (trends go stale); expired drafts can still be approved.
@@ -27,8 +28,8 @@ velocity score,      LLM moderation                          checks           �
 
 ### The console
 
-- **Dashboard**: posts published (per platform), views, drafts awaiting approval, in-progress and needs-attention counts; posts per day chart (with a table view); published by category; top posts; live pipeline state. 7/30/90-day ranges.
-- **Review**: each draft with its trending signal, why it needs review, the full script and sources; approve / edit / reject.
+- **Dashboard**: posts published (per platform), views, drafts awaiting approval, in-progress and needs-attention counts; posts per day chart (with a table view); published by category; top posts; live pipeline state. Below that, **channel analytics** for every upload on @chansharma870 (subscribers, uploads, Shorts vs videos, views, likes, most viewed), refreshed by the sweeper every 3 hours with the read-only API key (about 5 quota units). 7/30/90-day ranges.
+- **Review**: each draft with its signal (trending video, news story or your theme), why it needs review, the full script and sources; approve / edit / reject. **Create from theme** (from the YoutubePosts Studio) queues a one-off draft about a theme you type: the worker finds recent coverage, then it goes through the same script, policy, approval and publishing steps.
 - **All posts**: search and filter every item; open one for the video player, publications with links and metrics, script, policy decision, QA report and full audit history; retry a failed platform; unpublish.
 - **Health & settings**: YouTube quota today, Claude spend today, platform sign-in status, queues and dead-letters (with replay), discovery runs, kill switch, YouTube privacy for new uploads, auto-approve categories.
 
@@ -113,12 +114,21 @@ With real keys in the environment (`ANTHROPIC_API_KEY`, `YOUTUBE_API_KEY`), `pyt
 | R6 | Platform warning or takedown | E-mail from the platform | Kill switch on; clear auto-approve categories; review recent items; extend the deny-list. |
 | R7 | Suspected secret leak | Secret scanner, unusual Key Vault access | Revoke and rotate every affected secret (Google grant, Meta token and app secret, Anthropic key); review Key Vault logs. |
 
+## Moving over from YoutubePosts
+
+This project replaces the earlier YoutubePosts repo (GitHub Actions + Azure Functions Studio). Its renderer, voice, story picker, theme flow and channel dashboard now live here. To switch over:
+
+1. Reuse the same Google Cloud project: put its API key, OAuth client id/secret and refresh token into Key Vault (`infra/deploy.sh secrets`, then `KEY_VAULT_URI=… python -m ytp set-secret yt-client-id` (reads the value from stdin) for the client id, secret and refresh token, or run `bootstrap-youtube` with the same `client_secret.json`). GitHub Actions secrets can't be read back, so use your local copies.
+2. Once the first draft here publishes, disable the old repo's workflows (Actions → each workflow → Disable) and delete its Azure Functions app. Running both would share the 10,000-unit YouTube quota (about 6 uploads a day) and could cover the same story twice.
+
 ## Layout
 
 ```
 src/ytp/
   common/      config, Table/SQLite store, queues, media, Key Vault secrets, redacting logs, errors, models, repo
-  discovery/   TrendDiscoveryService (YouTube mostPopular IN, scoring, fingerprints, Google News context)
+  discovery/   TrendDiscoveryService (YouTube mostPopular IN, scoring, fingerprints, Google News context),
+               stories.py (news-led niche hierarchy and headline clustering; Create from theme)
+  analytics/   channel.py (whole-channel stats for the dashboard)
   scripting/   ScriptGenEngine (Claude, strict JSON, untrusted-data blocks, spend cap)
   policy/      ContentPolicyGate (rules + moderation, fail closed)
   render/      engine (TTS, frames, ffmpeg) and qa (spec checks)
@@ -127,5 +137,5 @@ src/ytp/
   pipeline.py  stage handlers, operator actions, worker loop, sweeper
   fakes.py     fakes for every external service (tests and `ytp demo`)
 infra/         main.bicep (all resources), deploy.sh
-tests/         33 tests incl. the mandatory exactly-once tests and the log-redaction test
+tests/         45 tests incl. the mandatory exactly-once tests and the log-redaction test
 ```

@@ -132,11 +132,52 @@ class GoogleNews:
 
 class TrendDiscoveryService:
     def __init__(self, settings: Settings, repo: Repo, source: TrendSource | None = None,
-                 news: NewsSource | None = None, secrets: Secrets | None = None):
+                 news: NewsSource | None = None, secrets: Secrets | None = None, stories=None):
         self.settings = settings
         self.repo = repo
-        self.source = source or YouTubeTrends((secrets or Secrets()).get("youtube-api-key"))
+        self._source, self._secrets = source, secrets
         self.news = news if news is not None else (GoogleNews() if settings.news_context else None)
+        self._stories = stories
+
+    @property
+    def source(self) -> TrendSource:
+        if self._source is None:
+            self._source = YouTubeTrends((self._secrets or Secrets()).get("youtube-api-key"))
+        return self._source
+
+    @property
+    def stories(self):
+        if self._stories is None:
+            from .stories import StoryFinder
+
+            self._stories = StoryFinder(fetch_articles=self.settings.fetch_articles)
+        return self._stories
+
+    def news_candidates(self, at: datetime, wanted: int) -> list[TrendPayload]:
+        """The best story of each niche, in hierarchy order, until `wanted` are found (ported from YoutubePosts)."""
+        from .stories import configured_niches, overlap, significant_words, to_payload
+
+        out: list[TrendPayload] = []
+        for niche in configured_niches(self.settings.news_niches):
+            if len(out) >= wanted:
+                break
+
+            def skip(story, chosen=out):
+                text = f"{story.headline} {' '.join(i.title for i in story.items[:5])}"
+                if deny_matches(text, self.settings.deny_topics):
+                    return True
+                if self.repo.topic_seen(_story_fp(story.headline), self.settings.topic_dedupe_days):
+                    return True
+                words = significant_words(story.headline)
+                return any(overlap(words, significant_words(c.title)) >= 0.5 for c in chosen)
+
+            found = self.stories.stories(niche, self.settings.news_lookback_hours, at, skip)
+            if found:
+                story = found[0]
+                story.article_text = self.stories.article_text(story)
+                out.append(to_payload(story, at))
+                log.info("news niche %s: %r (%d outlets)", niche.key, story.headline, len(story.sources))
+        return out
 
     def candidates(self, at: datetime) -> list[TrendPayload]:
         out: list[TrendPayload] = []
@@ -190,22 +231,32 @@ class TrendDiscoveryService:
             return {"status": "duplicate", "run": run_key}
         created, skipped, found = [], 0, 0
         try:
-            candidates = self.candidates(at)
-            found = len(candidates)
+            news_n = min(self.settings.news_topics_per_run, self.settings.top_n_topics)
             chosen: list[TrendPayload] = []
+            if news_n:
+                try:
+                    chosen = self.news_candidates(at, news_n)
+                except Exception as exc:  # noqa: BLE001 - news-led stories are optional
+                    log.warning("news-led discovery failed: %s", exc)
+            found = len(chosen)
+            yt_wanted = self.settings.top_n_topics - len(chosen)
+            candidates = self.candidates(at) if yt_wanted > 0 else []
+            found += len(candidates)
+            yt_chosen: list[TrendPayload] = []
             for trend in candidates:
-                if len(chosen) >= self.settings.top_n_topics:
+                if len(yt_chosen) >= yt_wanted:
                     break
                 if deny_matches(f"{trend.title} {' '.join(trend.tags)}", self.settings.deny_topics):
                     skipped += 1
                     continue
                 if self.repo.topic_seen(trend.fingerprint, self.settings.topic_dedupe_days) or \
-                        any(similar(trend.title, c.title) for c in chosen):
+                        any(similar(trend.title, c.title) for c in chosen + yt_chosen):
                     skipped += 1
                     continue
-                chosen.append(trend)
+                yt_chosen.append(trend)
+            chosen += yt_chosen
             for trend in chosen:
-                if self.news is not None:
+                if self.news is not None and not trend.news:
                     trend.news = self.news.search(" ".join(key_phrases(trend.title)[:4]))
                 content_id = self.repo.create_item(trend.model_dump(mode="json"), run_key, self.settings.platforms)
                 self.repo.mark_topic(trend.fingerprint, content_id)
@@ -216,6 +267,50 @@ class TrendDiscoveryService:
             raise
         log.info("run %s: %d candidates, %d created, %d skipped", run_key, found, len(created), skipped)
         return {"status": "ok", "run": run_key, "found": found, "created": created, "skipped": skipped}
+
+
+    def run_theme(self, run_key: str, theme: str, terms: list[str], hours: int, actor: str,
+                  at: datetime | None = None) -> dict:
+        """One draft about a theme the owner typed in the console ("Create from theme", from YoutubePosts' Studio).
+        It goes through the same script, policy, approval and publishing steps as everything else."""
+        from .stories import overlap, significant_words, theme_niche, to_payload
+
+        at = at or datetime.now(timezone.utc)
+        if not self.repo.claim_run(run_key, "theme"):
+            return {"status": "duplicate", "run": run_key}
+        try:
+            if deny_matches(f"{theme} {' '.join(terms)}", self.settings.deny_topics):
+                self.repo.finish_run(run_key, "SKIPPED", error="theme matches the deny list", found=0, created=0)
+                return {"status": "denied", "run": run_key}
+            niche = theme_niche(theme, terms)
+            words = significant_words(f"{theme} {' '.join(terms)}")
+
+            def skip(story):
+                return deny_matches(story.headline, self.settings.deny_topics)
+
+            found = self.stories.stories(niche, hours, at, skip)
+            # Prefer stories that actually share words with the theme, then the most covered.
+            found.sort(key=lambda s: (overlap(words, significant_words(s.headline)) > 0, s.score), reverse=True)
+            if not found:
+                self.repo.finish_run(run_key, "FAILED", error="no recent coverage for this theme", found=0, created=0)
+                return {"status": "not_found", "run": run_key}
+            story = found[0]
+            story.article_text = self.stories.article_text(story)
+            trend = to_payload(story, at, origin="theme", theme=theme)
+            content_id = self.repo.create_item(trend.model_dump(mode="json"), run_key, self.settings.platforms)
+            self.repo.audit(content_id, actor, "requested from theme", {"theme": trend.theme})
+            self.repo.mark_topic(trend.fingerprint, content_id)
+            self.repo.finish_run(run_key, "SUCCEEDED", found=len(found), created=1, skipped=0)
+            return {"status": "ok", "run": run_key, "created": [content_id]}
+        except Exception as exc:
+            self.repo.finish_run(run_key, "FAILED", error=str(exc)[:500], found=0, created=0)
+            raise
+
+
+def _story_fp(headline: str) -> str:
+    from .stories import story_fingerprint
+
+    return story_fingerprint(headline)
 
 
 def run_key_for(at: datetime, slots_per_day: int = 4) -> str:
