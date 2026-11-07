@@ -138,17 +138,39 @@ class Language(StrEnum):
 
 
 VISUALS = ("alert", "stat", "list", "explainer", "quote", "warning")
+TONES = ("excited", "curious", "serious", "calm", "funny")
+
+
+def _broll(v) -> list[str]:
+    """Stock-footage search terms: short, plain words, no names (stock libraries have no real people's clips)."""
+    out = []
+    for term in v or []:
+        term = re.sub(r"[^\w\s-]", " ", str(term), flags=re.UNICODE)
+        term = re.sub(r"\s+", " ", term).strip()[:40]
+        if term and term.lower() not in {t.lower() for t in out}:
+            out.append(term)
+    return out[:3]
 
 
 class Scene(BaseModel):
     narration: str = Field(min_length=3, max_length=320)
     on_screen_text: str = Field(min_length=1, max_length=60)
     visual: str = "explainer"
+    # What the viewer sees while this line is spoken, as stock-footage search terms (e.g. "mumbai traffic night").
+    broll: list[str] = Field(default_factory=list)
+    tone: str = "curious"   # how the line is voiced and how the mascot reacts
 
     @field_validator("visual", mode="before")
     @classmethod
     def _visual(cls, v):
         return v if v in VISUALS else "explainer"
+
+    @field_validator("tone", mode="before")
+    @classmethod
+    def _tone(cls, v):
+        return v if v in TONES else "curious"
+
+    _clean_broll = field_validator("broll", mode="before")(classmethod(lambda cls, v: _broll(v)))
 
 
 class ScriptJSON(BaseModel):
@@ -162,11 +184,14 @@ class ScriptJSON(BaseModel):
     tags: list[str] = Field(default_factory=list, max_length=15)
     language: Language = Language.EN_IN
     hook_text: str = Field(min_length=3, max_length=120)
+    hook_broll: list[str] = Field(default_factory=list)
     scenes: list[Scene] = Field(min_length=3, max_length=8)
     call_to_action: str = Field(min_length=3, max_length=120)
     claims_need_sources: bool
     sources: list[HttpUrl] = Field(default_factory=list, max_length=5)
     risk_flags: list[str] = Field(default_factory=list, max_length=10)
+
+    _clean_hook_broll = field_validator("hook_broll", mode="before")(classmethod(lambda cls, v: _broll(v)))
 
     @field_validator("hashtags", mode="before")
     @classmethod

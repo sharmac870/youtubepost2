@@ -5,6 +5,7 @@ External services come from `Services`, so tests and local runs can swap in fake
 """
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import logging
@@ -77,8 +78,15 @@ def default_services(rt: Runtime) -> Services:
 
         return ChannelStats(sec.get("youtube-api-key"))
 
+    def stock():
+        from .render.engine.footage import providers_from
+
+        return providers_from(sec.get("pexels-api-key", required=False), sec.get("pixabay-api-key", required=False))
+
+    renderer = functools.partial(engine.render, style=s.render_style, mascot=s.mascot, providers=stock)
+
     return Services(trends=lambda: YouTubeTrends(sec.get("youtube-api-key")),
-                    news=lambda: GoogleNews() if s.news_context else None, llm=llm, renderer=engine.render,
+                    news=lambda: GoogleNews() if s.news_context else None, llm=llm, renderer=renderer,
                     youtube=youtube, instagram=instagram, qa=qa.check, stories=stories, channel=channel)
 
 
@@ -263,6 +271,12 @@ class Pipeline:
             render = {"blob": blob, "thumb": f"{cid}/v{version}.jpg", "sha256": sha, "seconds": seconds,
                       "size": Path(video).stat().st_size, "render_s": round(time.monotonic() - started, 1),
                       "script_version": version, "engine": "pillow-ffmpeg", "licence_ref": "generated; synthesized music"}
+            credits_file = Path(tmp) / "credits.json"
+            if credits_file.exists():  # stock clips used (Pexels / Pixabay licence: free, no attribution needed)
+                clips = json.loads(credits_file.read_text())
+                if clips:
+                    render["licence_ref"] = "stock footage (Pexels/Pixabay licence); synthesized music"
+                    render["clips"] = [{"provider": c["provider"], "id": c["id"], "url": c["url"]} for c in clips][:40]
             report = self.services.qa(Path(video), max_seconds=90)
         return render, report
 

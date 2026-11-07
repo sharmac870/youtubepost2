@@ -74,6 +74,11 @@ class Settings(BaseSettings):
     tts_voice: str = "en-IN-PrabhatNeural"
     tts_rate: str = "+10%"
     language: Literal["en-IN", "hi-IN"] = "en-IN"
+    # footage = stock clips cut every 2-3 s, kinetic captions, expressive voice; classic = the original text cards.
+    # Clips need a free Pexels (pexels-api-key) and/or Pixabay (pixabay-api-key) key in Key Vault; without one
+    # the footage style still renders, on the drawn background.
+    render_style: Literal["footage", "classic"] = "footage"
+    mascot: bool = True                  # the lip-synced cartoon host (footage style only)
     render_timeout_s: int = 1200
     max_video_seconds: float = 58.0
 

@@ -23,6 +23,29 @@ log = logging.getLogger(__name__)
 SAMPLE_RATE = 44100
 GAP = 0.12  # Silence between parts, in seconds. Short, to keep the pace up.
 
+# How each tone is voiced: rate change (percentage points on top of the base rate), pitch (Hz), and the pause
+# after the line (s). People speed up and lift their pitch when excited, slow down when serious, and pause
+# before a point lands; a flat rate with equal gaps is what makes TTS sound like a reader.
+PROSODY = {
+    "hook": (6, 4, 0.32),
+    "excited": (8, 5, 0.18),
+    "funny": (5, 3, 0.30),
+    "curious": (0, 2, 0.24),
+    "serious": (-6, -3, 0.34),
+    "calm": (-8, -2, 0.26),
+    "outro": (0, 2, 0.0),
+}
+
+
+def shift_rate(base: str, delta: int) -> str:
+    """'+10%' shifted by delta points, kept within edge-tts' sensible range."""
+    try:
+        value = int(base.strip().rstrip("%"))
+    except ValueError:
+        value = 0
+    value = max(-30, min(45, value + delta))
+    return f"{value:+d}%"
+
 
 @dataclass
 class Word:
@@ -80,14 +103,14 @@ def trim_silence(samples: np.ndarray, threshold: float = 0.01) -> tuple[np.ndarr
     return samples[start:end], start / SAMPLE_RATE
 
 
-async def _edge(text: str, voice: str, rate: str, path: Path) -> list[Word]:
+async def _edge(text: str, voice: str, rate: str, path: Path, pitch: str = "+0Hz") -> list[Word]:
     import edge_tts
 
     proxy = os.environ.get("HTTPS_PROXY") or None  # aiohttp ignores proxy env vars unless told
     try:
-        communicate = edge_tts.Communicate(text, voice, rate=rate, boundary="WordBoundary", proxy=proxy)
+        communicate = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch, boundary="WordBoundary", proxy=proxy)
     except TypeError:  # edge-tts before 7.0 always reported word boundaries
-        communicate = edge_tts.Communicate(text, voice, rate=rate, proxy=proxy)
+        communicate = edge_tts.Communicate(text, voice, rate=rate, pitch=pitch, proxy=proxy)
     words = []
     with open(path, "wb") as audio:
         async for chunk in communicate.stream():
@@ -113,11 +136,12 @@ def _gtts(text: str, path: Path, language: str = "en") -> None:
     gTTS(text=text, lang=language, tld="com").save(str(path))
 
 
-def speak(text: str, voice: str, rate: str, folder: Path, name: str) -> tuple[np.ndarray, list[Word]]:
+def speak(text: str, voice: str, rate: str, folder: Path, name: str,
+          pitch: str = "+0Hz") -> tuple[np.ndarray, list[Word]]:
     mp3 = folder / f"{name}.mp3"
     words: list[Word] = []
     try:
-        words = asyncio.run(_edge(text, voice, rate, mp3))
+        words = asyncio.run(_edge(text, voice, rate, mp3, pitch))
         samples = decode(mp3)
     except Exception as exc:  # noqa: BLE001 - fall back to the second free engine
         log.warning("edge-tts failed (%s); falling back to gTTS", exc)
@@ -133,22 +157,29 @@ def speak(text: str, voice: str, rate: str, folder: Path, name: str) -> tuple[np
     return samples, words
 
 
-def synthesize(parts: list[str], voice: str, rate: str, folder: Path) -> Voiceover:
+def synthesize(parts: list[str], voice: str, rate: str, folder: Path, tones: list[str] | None = None) -> Voiceover:
+    """Voices each part. With `tones` (one per part: "hook", a scene tone, "outro"), each part gets its own pace,
+    pitch and pause; without them every part is voiced the same way with a short fixed gap."""
     folder.mkdir(parents=True, exist_ok=True)
-    gap = np.zeros(int(GAP * SAMPLE_RATE), dtype=np.float32)
     timeline: list[np.ndarray] = []
     segments: list[Segment] = []
     cursor = 0.0
     for index, text in enumerate(parts):
         text = re.sub(r"\s+", " ", text).strip()
-        samples, words = speak(text, voice, rate, folder, f"part{index:02d}")
+        if tones:
+            d_rate, d_pitch, pause = PROSODY.get(tones[index] if index < len(tones) else "", PROSODY["curious"])
+            part_rate, pitch = shift_rate(rate, d_rate), f"{d_pitch:+d}Hz"
+        else:
+            part_rate, pitch, pause = rate, "+0Hz", GAP
+        gap = np.zeros(int(pause * SAMPLE_RATE), dtype=np.float32)
+        samples, words = speak(text, voice, part_rate, folder, f"part{index:02d}", pitch)
         length = len(samples) / SAMPLE_RATE
         segments.append(Segment(
             index, text, cursor, cursor + length,
             [Word(w.text, cursor + w.start, cursor + w.end) for w in words],
         ))
         timeline += [samples, gap]
-        cursor += length + GAP
+        cursor += length + pause
     audio = np.concatenate(timeline)
     peak = float(np.max(np.abs(audio))) or 1.0
     audio = audio * (0.89 / peak)  # about -1 dBFS

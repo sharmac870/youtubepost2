@@ -9,3 +9,4 @@ out/
 .pytest_cache/
 .ruff_cache/
 infra/allowed-users.txt
+*.egg-info/

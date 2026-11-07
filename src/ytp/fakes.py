@@ -68,18 +68,20 @@ def sample_script(topic: str, url: str | None = None) -> dict:
         "caption": f"{topic}: the 45-second version.", "hashtags": ["India", "Trending", "Explained", "News"],
         "tags": ["india", "trending", "explained"], "language": "en-IN",
         "hook_text": "This is the story the whole country is searching for right now.",
+        "hook_broll": ["mumbai city timelapse", "people looking at phones"],
         "scenes": [
             {"narration": f"Here is the short version. {topic} has taken over feeds across India since this "
                           "morning, and the conversation is only getting bigger.", "on_screen_text": "WHAT HAPPENED",
-             "visual": "alert"},
+             "visual": "alert", "tone": "excited", "broll": ["smartphone scrolling feed", "busy indian street"]},
             {"narration": "Reports say interest jumped within hours, with millions of views and searches from every "
                           "state. That is unusual even for a big week.", "on_screen_text": "MILLIONS WATCHING",
-             "visual": "stat"},
+             "visual": "stat", "tone": "curious", "broll": ["crowd watching phones", "data chart screen"]},
             {"narration": "Why does it matter? Because it touches things people use and care about every day, and "
                           "the next few days will decide how it plays out.", "on_screen_text": "WHY IT MATTERS",
-             "visual": "explainer"},
+             "visual": "explainer", "tone": "serious", "broll": ["family at home evening", "office laptop work"]},
             {"narration": "Keep an eye on official updates, and be careful with forwards that sound too good to be "
-                          "true.", "on_screen_text": "WHAT TO WATCH", "visual": "warning"},
+                          "true.", "on_screen_text": "WHAT TO WATCH", "visual": "warning",
+             "tone": "calm", "broll": ["person reading phone", "news on television"]},
         ],
         "call_to_action": "What do you think? Tell me in the comments and follow for more.",
         "claims_need_sources": bool(url), "sources": [url] if url else [], "risk_flags": [],

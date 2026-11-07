@@ -8,6 +8,9 @@
   demo                       local only: fill a local database through the real pipeline with fakes
   bootstrap-youtube FILE     one-time OAuth (PKCE) for the channel; writes the refresh token to Key Vault
   set-secret NAME            read a secret from stdin and write it to Key Vault (never echoed)
+  render-sample [--out DIR] [--style footage|classic]
+                             render one sample Short on this machine (stock clips need PEXELS_API_KEY or
+                             PIXABAY_API_KEY in the environment); nothing is stored or published
 """
 from __future__ import annotations
 
@@ -42,6 +45,10 @@ def main(argv: list[str] | None = None) -> int:
     b.add_argument("client_secret_json")
     k = sub.add_parser("set-secret")
     k.add_argument("name")
+    rs = sub.add_parser("render-sample")
+    rs.add_argument("--out", default="sample-render")
+    rs.add_argument("--style", choices=["footage", "classic"], default="footage")
+    rs.add_argument("--no-mascot", action="store_true")
     args = parser.parse_args(argv)
 
     settings = get_settings()
@@ -58,6 +65,22 @@ def main(argv: list[str] | None = None) -> int:
         from .bootstrap import bootstrap_youtube
 
         return bootstrap_youtube(args.client_secret_json, settings)
+    if args.command == "render-sample":
+        import os
+        from pathlib import Path
+
+        from .common.models import ScriptJSON
+        from .fakes import sample_script
+        from .render import engine
+        from .render.engine.footage import providers_from
+
+        script = ScriptJSON.model_validate(sample_script("UPI payment limits"))
+        video, thumb, seconds = engine.render(
+            script, "25", Path(args.out), settings.tts_voice, settings.tts_rate, settings.max_video_seconds,
+            style=args.style, mascot=not args.no_mascot,
+            providers=lambda: providers_from(os.environ.get("PEXELS_API_KEY", ""), os.environ.get("PIXABAY_API_KEY", "")))
+        print(f"{video} ({seconds} s)")
+        return 0
     if args.command == "set-secret":
         from .bootstrap import set_secret
 

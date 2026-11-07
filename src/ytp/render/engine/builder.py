@@ -20,6 +20,8 @@ import imageio_ffmpeg
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+from . import mascot as host
+from .footage import ClipReader, shade
 from .tts import SAMPLE_RATE, Voiceover, Word, decode, write_wav
 
 log = logging.getLogger(__name__)
@@ -270,6 +272,31 @@ class Shot:
     caption: str
     visual: str = "alert"
     number: int = 0
+    tone: str = "curious"
+    broll: tuple = ()
+
+
+@dataclass
+class Beat:
+    """A stretch of one shot that shows one stock clip. Shots are cut into 2-3 s beats, the way people edit."""
+    start: float
+    end: float
+    clip: str | None = None     # local mp4; None = the drawn background
+    offset: float = 0.0         # where in the clip to start
+    zoom_in: bool = True
+
+
+def split_beats(shot: Shot, words: list[Word], target: float = 2.6) -> list[tuple[float, float]]:
+    """Cuts a shot into beats of about `target` seconds, each cut moved onto the nearest word start."""
+    length = shot.end - shot.start
+    n = max(1, round(length / target))
+    edges = [shot.start + length * i / n for i in range(n + 1)]
+    starts = [w.start for w in words if shot.start + 0.8 < w.start < shot.end - 0.8]
+    for i in range(1, n):
+        near = min(starts, key=lambda s: abs(s - edges[i]), default=None)
+        if near is not None and abs(near - edges[i]) < 0.45:
+            edges[i] = near
+    return [(a, b) for a, b in zip(edges, edges[1:]) if b - a > 0.3]
 
 
 def build_shots(script, voice: Voiceover) -> list[Shot]:
@@ -280,12 +307,14 @@ def build_shots(script, voice: Voiceover) -> list[Shot]:
         start = 0.0 if i == 0 else segment.start
         end = segments[i + 1].start if i + 1 < len(segments) else total
         if i == 0:
-            shots.append(Shot("hook", start, end, script.hook))
+            shots.append(Shot("hook", start, end, script.hook, tone="excited",
+                              broll=tuple(getattr(script, "hook_broll", ()) or ())))
         elif i == len(segments) - 1:
-            shots.append(Shot("outro", start, end, script.outro))
+            shots.append(Shot("outro", start, end, script.outro, tone="funny"))
         else:
             scene = script.script_scenes[i - 1]
-            shots.append(Shot("scene", start, end, scene["on_screen_text"], scene["visual"], i))
+            shots.append(Shot("scene", start, end, scene["on_screen_text"], scene["visual"], i,
+                              scene.get("tone", "curious"), tuple(scene.get("broll") or ())))
     return shots
 
 
@@ -307,17 +336,75 @@ def caption_groups(words: list[Word], max_words: int = 3, max_chars: int = 18) -
 # ----- Frame -----
 
 
+# Per-video variety: the caption highlight, the host's shirt and the music change from video to video.
+HIGHLIGHTS = ((255, 214, 10), (0, 230, 150), (255, 92, 130), (90, 200, 255), (255, 150, 40))
+SHIRTS = ((64, 150, 255), (255, 96, 72), (40, 180, 130), (150, 100, 240), (240, 170, 40))
+
+
+def style_seed(script) -> int:
+    import hashlib
+
+    return int(hashlib.sha1(str(getattr(script, "title", "")).encode()).hexdigest()[:8], 16)
+
+
 class Renderer:
+    """Draws each frame. `modern` (the default) adds the stock-footage beats, the host, kinetic captions and
+    per-video variety; modern=False keeps the original text-card look exactly."""
+
     def __init__(self, script, voice: Voiceover, niche: str, date: datetime | None = None,
-                 layout: Layout | None = None, theme: Theme | None = None):
+                 layout: Layout | None = None, theme: Theme | None = None, beats: list[Beat] | None = None,
+                 mascot: bool = False, modern: bool = False):
         self.script = script
         self.voice = voice
-        self.L = layout or layout_for(getattr(script, "format", "short"))
+        self.modern = modern or mascot or bool(beats)
+        base = layout or layout_for(getattr(script, "format", "short"))
+        self.with_host = mascot
+        if mascot and base is PORTRAIT:  # make room for the host under the hook and outro text
+            base = replace(base, hook_top=400, hook_lines=4, hook_size=96, outro_top=380, outro_lines=4,
+                           caption_y=1190, subtitle_size=88)
+        self.L = base
+        self.portrait = base.height > base.width
         self.theme = theme or theme_for(niche)
         self.shots = build_shots(script, voice)
         self.duration = voice.duration + TAIL
-        self.groups = caption_groups(voice.words, 3 if self.L is PORTRAIT else 5, 18 if self.L is PORTRAIT else 34)
+        self.groups = caption_groups(voice.words, 3 if self.portrait else 5, 18 if self.portrait else 34)
         self.date = (date or datetime.now(timezone.utc)).strftime("%b %d, %Y").upper()
+        self.seed = style_seed(script)
+        self.highlight = HIGHLIGHTS[self.seed % len(HIGHLIGHTS)] if self.modern else YELLOW
+        self.shirt = SHIRTS[(self.seed // 7) % len(SHIRTS)]
+        self.beats = sorted(beats or [], key=lambda b: b.start)
+        self._reader: tuple[Beat, ClipReader] | None = None
+        self.sync = None
+        if mascot:
+            try:
+                samples = decode(voice.path)
+            except Exception:  # noqa: BLE001 - no audio to read: the host just doesn't talk
+                samples = np.zeros(SAMPLE_RATE, dtype=np.float32)
+            self.sync = host.Lipsync(samples, SAMPLE_RATE, voice.words, FPS)
+
+    def beat_at(self, t: float) -> Beat | None:
+        for beat in self.beats:
+            if beat.start <= t < beat.end:
+                return beat
+        return None
+
+    def clip_frame(self, beat: Beat, t: float) -> Image.Image:
+        if self._reader is None or self._reader[0] is not beat:
+            self.close()
+            reader = ClipReader(beat.clip, self.L.width, self.L.height, beat.end - beat.start, beat.offset,
+                                beat.zoom_in)
+            # Catch up when a frame is asked for mid-beat (the thumbnail).
+            for _ in range(max(0, int((t - beat.start) * FPS))):
+                reader.next()
+            self._reader = (beat, reader)
+        frame = self._reader[1].next()
+        black = Image.new("RGB", frame.size, INK)
+        return Image.composite(black, frame, shade(self.L.width, self.L.height))
+
+    def close(self) -> None:
+        if self._reader is not None:
+            self._reader[1].close()
+            self._reader = None
 
     def shot_at(self, t: float) -> Shot:
         for shot in self.shots:
@@ -327,11 +414,16 @@ class Renderer:
 
     def frame(self, t: float) -> Image.Image:
         L = self.L
-        drift = int(400 * t / self.duration)
-        frame = backdrop(self.theme.glow, L, self.theme.texture == "hex").crop((0, drift, L.width, drift + L.height))
-        rain = texture_layer(self.theme.texture, L)
-        offset = int(t * (90 if self.theme.texture in ("hex", "stripes") else 40)) % L.height
-        frame.paste(self.theme.accent, (0, 0), rain.crop((0, L.height - offset, L.width, 2 * L.height - offset)))
+        beat = self.beat_at(t)
+        on_footage = bool(beat and beat.clip)
+        if on_footage:
+            frame = self.clip_frame(beat, t)
+        else:
+            drift = int(400 * t / self.duration)
+            frame = backdrop(self.theme.glow, L, self.theme.texture == "hex").crop((0, drift, L.width, drift + L.height))
+            rain = texture_layer(self.theme.texture, L)
+            offset = int(t * (90 if self.theme.texture in ("hex", "stripes") else 40)) % L.height
+            frame.paste(self.theme.accent, (0, 0), rain.crop((0, L.height - offset, L.width, 2 * L.height - offset)))
 
         shot = self.shot_at(t)
         local = t - shot.start
@@ -341,12 +433,115 @@ class Renderer:
             self.hook(frame, draw, shot, local)
         elif shot.kind == "outro":
             self.outro(frame, draw, shot, local)
+        elif on_footage:
+            self.headline(frame, draw, shot, local)
         else:
             self.scene(frame, draw, shot, local)
+        if self.with_host:
+            self.presenter(frame, shot, t, local)
+            draw = ImageDraw.Draw(frame)
         if shot.kind == "scene":  # The hook and outro already show their full text.
-            self.subtitles(draw, t)
+            if self.modern:
+                self.kinetic(frame, draw, t)
+            else:
+                self.subtitles(draw, t)
         self.progress(frame, t)
-        return self.cut_effects(frame, local, shot)
+        frame = self.cut_effects(frame, local, shot)
+        if beat and beat.start > shot.start + 0.05 and t - beat.start < 0.16:
+            # A small punch-in on cuts inside a shot, lighter than the scene-change hit.
+            k = 1 + 0.035 * (1 - ease(t - beat.start, 0, 0.16))
+            w, h = int(L.width * k), int(L.height * k)
+            frame = frame.resize((w, h), Image.BILINEAR).crop(((w - L.width) // 2, (h - L.height) // 2,
+                                                               (w - L.width) // 2 + L.width,
+                                                               (h - L.height) // 2 + L.height))
+        return frame
+
+    # ----- Modern layers -----
+
+    def headline(self, frame, draw, shot, local):
+        """Over footage the scene's caption becomes a compact headline at the top, leaving the picture clear."""
+        L = self.L
+        accent = RED if shot.visual in ("alert", "warning") else self.theme.accent
+        a = ease(local, 0.0, 0.25)
+        label = f"{shot.number:02d} / {VISUAL_LABELS.get(shot.visual, 'KEY FACTS')}"
+        tag = font("mono", 30, 700)
+        typeface = fit(shot.caption.upper(), "sans", 800, 76 if self.portrait else 70, 46, L.column - 60, 2)
+        lines = wrap(shot.caption.upper(), typeface, L.column - 60)
+        step = int(typeface.size * 1.08)
+        top = L.tag_y - 120 + int((1 - a) * -30) if self.portrait else L.tag_y - 40
+        height = 74 + step * len(lines) + 30
+        width = max(int(tag.getlength(label)), *(int(typeface.getlength(x)) for x in lines)) + 70
+        width = min(width, L.column)
+        box(frame, L.left, top, L.left + int(width * a), top + height, 26, (8, 12, 20), 0.78 * a)
+        box(frame, L.left, top, L.left + 10, top + height, 5, accent, a)
+        if a > 0.6:
+            draw.text((L.left + 36, top + 22), label, font=tag, fill=accent)
+            for i, line in enumerate(lines):
+                color = accent if (shot.visual == "stat" and i == 0) else WHITE
+                draw.text((L.left + 36, top + 70 + i * step), line, font=typeface, fill=color)
+
+    def presenter(self, frame, shot, t, local):
+        """The host: big under the hook and outro text, small in the corner during scenes, reacting to the voice."""
+        L = self.L
+        big = shot.kind in ("hook", "outro")
+        height = int(L.height * (0.34 if big else 0.15)) if self.portrait else int(L.height * (0.46 if big else 0.26))
+        level = self.sync.level_at(t)
+        pose = host.pose_at(t, self.sync, shot.tone, waving=shot.kind == "outro" and local > 0.4, seed=self.seed)
+        image = host.draw(pose, self.shirt, height)
+        dy, tilt = host.bob(t, level)
+        if abs(tilt) > 0.3:
+            image = image.rotate(tilt, resample=Image.BICUBIC, center=(image.width // 2, image.height))
+        enter = ease(local, 0.0, 0.35) if big else ease(local, 0.1, 0.3)
+        bottom = L.height - int(L.height * 0.17) if self.portrait else L.height - 20
+        if big:
+            x = L.center - image.width // 2 - (40 if self.portrait else -L.width // 4)
+        else:
+            x = L.left - 20 if self.portrait else L.right - image.width
+        y = bottom - image.height + dy + int((1 - enter) * image.height * 0.6)
+        # A soft spotlight behind the host so it sits in the scene instead of floating.
+        glow_r = int(image.width * 0.62)
+        cx, cy = x + image.width // 2, y + int(image.height * 0.45)
+        spot = Image.new("L", (glow_r * 2, glow_r * 2), 0)
+        ImageDraw.Draw(spot).ellipse((0, 0, glow_r * 2 - 1, glow_r * 2 - 1), fill=int(120 * enter))
+        frame.paste(self.theme.accent if big else (20, 26, 38), (cx - glow_r, cy - glow_r), spot)
+        frame.paste(image, (x, y), image)
+
+    def kinetic(self, frame, draw, t):
+        """Captions that pop in a few words at a time, with the spoken word on a coloured block."""
+        group = next((g for g in self.groups if g[0].start - 0.05 <= t < g[-1].end + 0.25), None)
+        if not group:
+            return
+        L = self.L
+        size = L.subtitle_size + (8 if self.portrait else 0)
+        typeface = font("sans", size, 800)
+        texts = [w.text.upper() for w in group]
+        space = typeface.getlength(" ") + 6
+        widths = [typeface.getlength(text) for text in texts]
+        total = sum(widths) + space * (len(texts) - 1)
+        if total > L.column:
+            typeface = font("sans", int(size * L.column / total), 800)
+            space = typeface.getlength(" ") + 6
+            widths = [typeface.getlength(text) for text in texts]
+            total = sum(widths) + space * (len(texts) - 1)
+        x = L.center - total / 2
+        pop = ease(t, group[0].start - 0.05, 0.14)
+        base_y = L.caption_y + int((1 - pop) * 36)
+        for word, text, width in zip(group, texts, widths):
+            if t < word.start - 0.05:  # words appear as they are spoken
+                x += width + space
+                continue
+            active = word.start <= t < word.end + 0.06
+            bounce = int(-10 * (1 - ease(t, word.start, 0.12))) if active else 0
+            y = base_y + bounce
+            if active:
+                pad = 14
+                box(frame, x - pad, y - 6, x + width + pad, y + typeface.size + 18, 18, self.highlight)
+                draw.text((x, y), text, font=typeface, fill=INK)
+            else:
+                strong = any(ch.isdigit() for ch in text) or len(text.strip(".,!?")) >= 8
+                draw.text((x, y), text, font=typeface, fill=self.highlight if strong else WHITE,
+                          stroke_width=9, stroke_fill=BLACK)
+            x += width + space
 
     def header(self, frame, draw, t):
         L, accent = self.L, self.theme.accent
@@ -431,7 +626,8 @@ class Renderer:
             draw.text((CENTER, y + h // 2), "SUBSCRIBE", font=font("sans", 58, 800), fill=WHITE, anchor="mm")
             preset = self.theme in THEMES.values() and L is PORTRAIT
             tagline = f"daily {self.theme.badge.lower()} in 45 seconds" if preset else "hit subscribe for more"
-            draw.text((CENTER, y + h + 50), tagline, font=font("mono", 34, 600), fill=accent, anchor="mm")
+            if not self.with_host:  # the waving host sits where the tagline would go
+                draw.text((CENTER, y + h + 50), tagline, font=font("mono", 34, 600), fill=accent, anchor="mm")
 
     def subtitles(self, draw, t):
         group = next((g for g in self.groups if g[0].start - 0.05 <= t < g[-1].end + 0.25), None)
@@ -497,14 +693,25 @@ def place(mix: np.ndarray, signal: np.ndarray, start: float, gain: float = 1.0):
     mix[begin : begin + len(part)] += part * gain
 
 
-def music_bed(duration: float, cuts: list[float]) -> np.ndarray:
-    """A dark, driving bed: drone, pulse at 120 BPM, ticking hats, and a whoosh-hit on every cut."""
-    rng = np.random.default_rng(7)
+MUSIC = (  # (BPM, root Hz, arpeggio in semitones): one is picked per video so they don't all sound the same
+    (120, 55.0, (0, 3, 7, 10)),
+    (104, 49.0, (0, 4, 7, 11)),
+    (128, 58.27, (0, 7, 3, 10)),
+    (112, 61.74, (0, 5, 7, 12)),
+    (96, 51.91, (0, 3, 5, 7)),
+)
+
+
+def music_bed(duration: float, cuts: list[float], variant: int = 0) -> np.ndarray:
+    """A driving bed: drone, a kick pulse, ticking hats, an arpeggio, and a whoosh-hit on every cut.
+    `variant` picks tempo, key and melody; 0 is the original bed."""
+    bpm, root, arp = MUSIC[variant % len(MUSIC)]
+    rng = np.random.default_rng(7 + variant)
     mix = np.zeros(int(duration * SAMPLE_RATE))
-    beat = 0.5
+    beat = 60.0 / bpm
     times = np.arange(len(mix)) / SAMPLE_RATE
-    # Drone on A, slowly breathing.
-    drone = sum(np.sin(2 * np.pi * f * times) for f in (55.0, 110.0, 164.8)) / 3
+    # Drone on the root, slowly breathing.
+    drone = sum(np.sin(2 * np.pi * f * times) for f in (root, root * 2, root * 2.996)) / 3
     mix += drone * 0.18 * (0.75 + 0.25 * np.sin(2 * np.pi * times / 8))
     for i in range(int(duration / beat)):
         t = i * beat
@@ -512,7 +719,9 @@ def music_bed(duration: float, cuts: list[float]) -> np.ndarray:
         kick = np.sin(2 * np.pi * (45 * kick_t + 30 * (1 - np.exp(-kick_t * 30)))) * np.exp(-kick_t / 0.09)
         place(mix, kick, t, 0.55)
         if i % 4 == 2:
-            place(mix, tone(220 * 2 ** ([0, 3, 7, 10][(i // 4) % 4] / 12), 0.4, decay=0.15, harmonics=(1, 0.5, 0.2)), t, 0.12)
+            place(mix, tone(root * 4 * 2 ** (arp[(i // 4) % 4] / 12), 0.4, decay=0.15, harmonics=(1, 0.5, 0.2)), t, 0.12)
+        if variant and i % 2 == 1:  # the varied beds add a lighter off-beat pluck
+            place(mix, tone(root * 8 * 2 ** (arp[(i // 2) % 4] / 12), 0.25, decay=0.08, harmonics=(1, 0.3)), t, 0.05)
         noise = np.diff(rng.normal(size=int(0.04 * SAMPLE_RATE)), prepend=0)
         place(mix, noise * np.exp(-np.arange(len(noise)) / (0.008 * SAMPLE_RATE)), t + beat / 2, 0.05)
     for cut in cuts:
@@ -525,11 +734,11 @@ def music_bed(duration: float, cuts: list[float]) -> np.ndarray:
     return np.tanh(mix)
 
 
-def mix_audio(voice: Voiceover, shots: list[Shot], duration: float, path: Path) -> None:
+def mix_audio(voice: Voiceover, shots: list[Shot], duration: float, path: Path, variant: int = 0) -> None:
     speech = decode(voice.path)
     total = int(duration * SAMPLE_RATE)
     speech = np.pad(speech, (0, max(0, total - len(speech))))[:total]
-    music = music_bed(duration, [s.start for s in shots[1:]])
+    music = music_bed(duration, [s.start for s in shots[1:]], variant)
     # Duck the music under the voice so every word stays clear.
     window = int(0.05 * SAMPLE_RATE)
     envelope = np.convolve(np.abs(speech), np.ones(window) / window, mode="same")
@@ -543,11 +752,12 @@ def mix_audio(voice: Voiceover, shots: list[Shot], duration: float, path: Path) 
 
 
 def render(script, voice: Voiceover, niche: str, output: Path, theme: Theme | None = None,
-           renderer_cls=None) -> Path:
-    renderer = (renderer_cls or Renderer)(script, voice, niche, theme=theme)
+           renderer_cls=None, **options) -> Path:
+    """options go to the Renderer: beats=[Beat...], mascot=True, modern=True."""
+    renderer = (renderer_cls or Renderer)(script, voice, niche, theme=theme, **options)
     L = renderer.L
     audio_path = output.with_suffix(".mix.wav")
-    mix_audio(voice, renderer.shots, renderer.duration, audio_path)
+    mix_audio(voice, renderer.shots, renderer.duration, audio_path, renderer.seed % len(MUSIC) if renderer.modern else 0)
     frames = int(renderer.duration * FPS)
     command = [
         imageio_ffmpeg.get_ffmpeg_exe(), "-y", "-loglevel", "error",
@@ -568,6 +778,7 @@ def render(script, voice: Voiceover, niche: str, output: Path, theme: Theme | No
     except BrokenPipeError as exc:
         raise RuntimeError(f"ffmpeg stopped: {encoder.stderr.read().decode(errors='replace')[:500]}") from exc
     finally:
+        renderer.close()
         if encoder.poll() is None:
             encoder.kill()
     log.info("rendered %s (%.1f s, %d frames)", output, renderer.duration, frames)
@@ -575,7 +786,11 @@ def render(script, voice: Voiceover, niche: str, output: Path, theme: Theme | No
 
 
 def thumbnail(script, voice: Voiceover, niche: str, path: Path, theme: Theme | None = None,
-              renderer_cls=None) -> Path:
+              renderer_cls=None, **options) -> Path:
     """A still from the hook, saved for reference (Shorts pick their own thumbnail frame)."""
-    (renderer_cls or Renderer)(script, voice, niche, theme=theme).frame(1.2).save(path, quality=90)
+    renderer = (renderer_cls or Renderer)(script, voice, niche, theme=theme, **options)
+    try:
+        renderer.frame(1.2).save(path, quality=90)
+    finally:
+        renderer.close()
     return path

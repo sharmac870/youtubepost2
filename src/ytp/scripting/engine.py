@@ -27,7 +27,7 @@ log = logging.getLogger(__name__)
 SCRIPT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "additionalProperties": False,
-    "required": ["topic", "title", "description", "caption", "hashtags", "tags", "language", "hook_text", "scenes",
+    "required": ["topic", "title", "description", "caption", "hashtags", "tags", "language", "hook_text", "hook_broll", "scenes",
                  "call_to_action", "claims_need_sources", "sources", "risk_flags"],
     "properties": {
         "topic": {"type": "string"},
@@ -38,11 +38,15 @@ SCRIPT_SCHEMA: dict[str, Any] = {
         "tags": {"type": "array", "items": {"type": "string"}},
         "language": {"type": "string", "enum": ["en-IN", "hi-IN"]},
         "hook_text": {"type": "string"},
+        "hook_broll": {"type": "array", "items": {"type": "string"}},
         "scenes": {"type": "array", "items": {
-            "type": "object", "additionalProperties": False, "required": ["narration", "on_screen_text", "visual"],
+            "type": "object", "additionalProperties": False,
+            "required": ["narration", "on_screen_text", "visual", "broll", "tone"],
             "properties": {"narration": {"type": "string"}, "on_screen_text": {"type": "string"},
                            "visual": {"type": "string", "enum": ["alert", "stat", "list", "explainer", "quote",
-                                                                 "warning"]}}}},
+                                                                 "warning"]},
+                           "broll": {"type": "array", "items": {"type": "string"}},
+                           "tone": {"type": "string", "enum": ["excited", "curious", "serious", "calm", "funny"]}}}},
         "call_to_action": {"type": "string"},
         "claims_need_sources": {"type": "boolean"},
         "sources": {"type": "array", "items": {"type": "string"}},
@@ -71,10 +75,20 @@ Content rules:
   legal or financial advice, nothing about elections, communal or religious conflict, or tragedies. If the topic
   is one of those, still return valid JSON but add a risk flag such as "elections", "communal", "tragedy",
   "crime", "medical", "financial", "minors", "private_individual" or "unverified_claim".
-- Language: clear Indian English (en-IN) unless told otherwise. Friendly, energetic, never clickbait lies.
+- Language: clear Indian English (en-IN) unless told otherwise. Never clickbait lies.
+- Voice: you are the channel's host, a friendly young Indian presenter talking to one friend. Speak like a person,
+  not a news reader: contractions, short sentences, a little humour, and your own honest take ("Honestly? I think
+  this is overhyped."). Include at least one personal reaction or opinion and one surprising "wait, what?" beat.
+  Ask the viewer a question at least once. No filler like "in today's video".
 - Structure: hook_text (one punchy line, spoken in the first 3 seconds, max 15 words); 3 to 6 scenes, each with
-  narration (1-3 short sentences) and on_screen_text (2-6 words, big caption) and a visual type; call_to_action
-  (one line, e.g. a question to comment on or "follow for more").
+  narration (1-3 short sentences), on_screen_text (2-6 words, big caption), a visual type, a tone (excited,
+  curious, serious, calm or funny; vary it across scenes the way a person's voice changes) and broll;
+  call_to_action (one line, e.g. a question to comment on or "follow for more").
+- Shot list: hook_broll and each scene's broll are 2 to 3 stock-footage search terms for what the viewer should SEE
+  while the line is spoken: concrete, filmable, 2-4 plain English words each ("smartphone screen scrolling",
+  "mumbai local train", "stock market screen", "cricket stadium crowd"). Pick different shots across scenes. Never
+  a person's name, a brand logo, a channel, or anything from the trending video; stock libraries only have
+  generic footage, so describe the scene, not the specific event.
 - Total spoken words (hook + scenes + call to action): 90 to 150.
 - title: max 90 characters, no "#Shorts" (it is added later), no ALL CAPS, no emojis.
 - description: 2-4 sentences for YouTube. caption: 1-3 sentences for Instagram. Do not add links; they are added.
