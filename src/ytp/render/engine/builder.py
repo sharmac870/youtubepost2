@@ -286,21 +286,27 @@ class Beat:
     zoom_in: bool = True
 
 
-def split_beats(shot: Shot, words: list[Word], target: float = 2.6) -> list[tuple[float, float]]:
-    """Cuts a shot into beats of about `target` seconds, each cut moved onto the nearest word start."""
-    length = shot.end - shot.start
-    n = max(1, round(length / target))
-    edges = [shot.start + length * i / n for i in range(n + 1)]
-    starts = [w.start for w in words if shot.start + 0.8 < w.start < shot.end - 0.8]
-    for i in range(1, n):
-        near = min(starts, key=lambda s: abs(s - edges[i]), default=None)
-        if near is not None and abs(near - edges[i]) < 0.45:
-            edges[i] = near
-    return [(a, b) for a, b in zip(edges, edges[1:]) if b - a > 0.3]
-
-
 def build_shots(script, voice: Voiceover) -> list[Shot]:
     segments = voice.segments
+    owners = getattr(script, "segment_scene", None)
+    if owners and len(owners) == len(segments):
+        # Voiced sentence by sentence: a scene runs from its first sentence to the next scene's first sentence.
+        total = voice.duration + TAIL
+        firsts = [i for i, o in enumerate(owners) if i == 0 or owners[i - 1] != o]
+        shots = []
+        for n, i in enumerate(firsts):
+            start = 0.0 if i == 0 else segments[i].start
+            end = segments[firsts[n + 1]].start if n + 1 < len(firsts) else total
+            owner = owners[i]
+            if owner == -1:
+                shots.append(Shot("hook", start, end, script.hook, tone="excited"))
+            elif owner == -2:
+                shots.append(Shot("outro", start, end, script.outro, tone="funny"))
+            else:
+                scene = script.script_scenes[owner]
+                shots.append(Shot("scene", start, end, scene["on_screen_text"], scene["visual"], owner + 1,
+                                  scene.get("tone", "curious")))
+        return shots
     total = voice.duration + TAIL
     shots = []
     for i, segment in enumerate(segments):

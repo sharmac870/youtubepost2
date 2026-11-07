@@ -152,13 +152,36 @@ def _broll(v) -> list[str]:
     return out[:3]
 
 
+class ShotLine(BaseModel):
+    """One spoken sentence and the one picture shown while it is spoken. The voice is generated per shot, so
+    the cut to this picture lands exactly when the sentence starts."""
+    say: str = Field(min_length=2, max_length=220)
+    show: str = Field(default="", max_length=200)     # what the viewer should see, concretely
+    search: str = Field(default="", max_length=60)    # stock-footage search for it, 2-4 plain words
+
+    @field_validator("search", mode="before")
+    @classmethod
+    def _search(cls, v):
+        return (_broll([v]) or [""])[0]
+
+
 class Scene(BaseModel):
-    narration: str = Field(min_length=3, max_length=320)
+    narration: str = Field(min_length=3, max_length=480)
     on_screen_text: str = Field(min_length=1, max_length=60)
     visual: str = "explainer"
     # What the viewer sees while this line is spoken, as stock-footage search terms (e.g. "mumbai traffic night").
     broll: list[str] = Field(default_factory=list)
     tone: str = "curious"   # how the line is voiced and how the mascot reacts
+    shots: list[ShotLine] = Field(default_factory=list, max_length=4)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _narration_from_shots(cls, data):
+        """Scripts written shot by shot carry no separate narration: it is the shots' sentences in order."""
+        if isinstance(data, dict) and data.get("shots") and not data.get("narration"):
+            data = {**data, "narration": " ".join(str(s.get("say", "")).strip() for s in data["shots"]
+                                                  if isinstance(s, dict))}
+        return data
 
     @field_validator("visual", mode="before")
     @classmethod
@@ -185,6 +208,7 @@ class ScriptJSON(BaseModel):
     language: Language = Language.EN_IN
     hook_text: str = Field(min_length=3, max_length=120)
     hook_broll: list[str] = Field(default_factory=list)
+    hook_show: str = Field(default="", max_length=200)
     scenes: list[Scene] = Field(min_length=3, max_length=8)
     call_to_action: str = Field(min_length=3, max_length=120)
     claims_need_sources: bool

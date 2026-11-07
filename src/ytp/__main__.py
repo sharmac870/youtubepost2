@@ -9,8 +9,9 @@
   bootstrap-youtube FILE     one-time OAuth (PKCE) for the channel; writes the refresh token to Key Vault
   set-secret NAME            read a secret from stdin and write it to Key Vault (never echoed)
   render-sample [--out DIR] [--style footage|classic]
-                             render one sample Short on this machine (stock clips need PEXELS_API_KEY or
-                             PIXABAY_API_KEY in the environment); nothing is stored or published
+                             render one sample Short on this machine; nothing is stored or published.
+                             Env: PEXELS_API_KEY / PIXABAY_API_KEY (clips), ANTHROPIC_API_KEY (checks each clip
+                             fits its sentence), FAL_API_KEY (optional AI images)
 """
 from __future__ import annotations
 
@@ -72,13 +73,22 @@ def main(argv: list[str] | None = None) -> int:
         from .common.models import ScriptJSON
         from .fakes import sample_script
         from .render import engine
-        from .render.engine.footage import providers_from
+        from .render.engine.footage import ClaudeJudge, FalImages, providers_from
+
+        def judge():
+            key = os.environ.get("ANTHROPIC_API_KEY", "")
+            if not key:
+                return None
+            import anthropic
+
+            return ClaudeJudge(anthropic.Anthropic(api_key=key), settings.anthropic_model, settings.footage_min_score)
 
         script = ScriptJSON.model_validate(sample_script("UPI payment limits"))
         video, thumb, seconds = engine.render(
             script, "25", Path(args.out), settings.tts_voice, settings.tts_rate, settings.max_video_seconds,
             style=args.style, mascot=not args.no_mascot,
-            providers=lambda: providers_from(os.environ.get("PEXELS_API_KEY", ""), os.environ.get("PIXABAY_API_KEY", "")))
+            providers=lambda: providers_from(os.environ.get("PEXELS_API_KEY", ""), os.environ.get("PIXABAY_API_KEY", "")),
+            judge=judge, images=lambda: FalImages(os.environ["FAL_API_KEY"]) if os.environ.get("FAL_API_KEY") else None)
         print(f"{video} ({seconds} s)")
         return 0
     if args.command == "set-secret":

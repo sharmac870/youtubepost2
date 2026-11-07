@@ -40,11 +40,29 @@ class RenderScript:
     format: str = "short"
     hook_broll: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
+    hook_show: str = ""
+    # Which scene each voiced segment belongs to (-1 hook, -2 outro), when the voice is made sentence by sentence.
+    segment_scene: list[int] | None = None
 
     @classmethod
     def of(cls, s: ScriptJSON) -> "RenderScript":
         return cls(s.title, s.hook_text, [sc.model_dump() for sc in s.scenes], s.call_to_action,
-                   hook_broll=list(s.hook_broll), tags=list(s.tags))
+                   hook_broll=list(s.hook_broll), tags=list(s.tags), hook_show=s.hook_show)
+
+    def lines(self) -> list[dict]:
+        """Every spoken sentence with its planned picture, in order: the unit the footage style is built from.
+        Scripts written before shot lists get one line per scene, searched by the scene's b-roll terms."""
+        out = [{"scene": -1, "say": self.hook, "show": self.hook_show, "search": list(self.hook_broll),
+                "tone": "hook"}]
+        for i, scene in enumerate(self.script_scenes):
+            tone = scene.get("tone", "curious")
+            shots = scene.get("shots") or [{"say": scene["narration"], "show": "", "search": ""}]
+            for shot in shots:
+                search = [shot.get("search", "")] if shot.get("search") else []
+                out.append({"scene": i, "say": shot["say"], "show": shot.get("show", ""),
+                            "search": search + [b for b in scene.get("broll") or [] if b not in search], "tone": tone})
+        out.append({"scene": -2, "say": self.outro, "show": "", "search": [], "tone": "outro"})
+        return out
 
     @property
     def narration_parts(self) -> list[str]:
@@ -71,39 +89,64 @@ class LabelledRenderer(builder.Renderer):
         return frame
 
 
-def plan_beats(shots: list[builder.Shot], words: list[tts.Word], stock: footage.Footage | None,
+def plan_beats(lines: list[dict], voice: tts.Voiceover, stock: footage.Footage | None,
                fallback: list[str]) -> list[builder.Beat]:
-    """One stock clip per 2-3 s beat of the hook and scenes, from that shot's search terms."""
+    """One beat per spoken sentence, starting exactly when the sentence starts and showing a picture chosen for
+    that sentence. Sentences longer than about 4.5 s get a second picture for their second half."""
     beats: list[builder.Beat] = []
+    segments = voice.segments
     flip = False
-    for shot in shots:
-        if shot.kind == "outro":
+    for k, (line, seg) in enumerate(zip(lines, segments)):
+        if line["scene"] == -2:
             continue
-        queries = list(shot.broll) or fallback
-        for n, (start, end) in enumerate(builder.split_beats(shot, words)):
-            clip = None
-            if stock is not None and queries:
-                rotated = queries[n % len(queries):] + queries[: n % len(queries)]
-                clip = stock.find(rotated, min_seconds=min(end - start, 4.0))
+        start = 0.0 if k == 0 else seg.start
+        end = segments[k + 1].start if k + 1 < len(segments) else voice.duration + builder.TAIL
+        spans = [(start, end)]
+        if end - start > 4.5:
+            middle = min((w.start for w in seg.words if start + 1.5 < w.start < end - 1.5),
+                         key=lambda x: abs(x - (start + end) / 2), default=None)
+            if middle:
+                spans = [(start, middle), (middle, end)]
+        queries = line["search"] or fallback
+        first = None
+        for n, (a, b) in enumerate(spans):
+            clip = stock.pick(line["say"], line["show"], queries, min_seconds=min(b - a, 4.0)) if stock else None
+            if clip is None and n and first is not None:
+                clip = first  # no second picture that fits: stay on the first one
+            first = first or clip
             offset = 0.0
-            if clip and clip.duration > (end - start) + 1:
-                offset = min(1.5, (clip.duration - (end - start)) / 3)
+            if clip and not clip.still and clip.duration > (b - a) + 1:
+                offset = min(1.5, (clip.duration - (b - a)) / 3)
+            if clip is first and n:
+                offset += spans[0][1] - spans[0][0]
             flip = not flip
-            beats.append(builder.Beat(start, end, clip.path if clip else None, offset, zoom_in=flip))
+            beats.append(builder.Beat(a, b, clip.path if clip else None, offset, zoom_in=flip))
     return beats
 
 
 def render(script: ScriptJSON, category_id: str, folder: Path, voice: str, rate: str,
            max_seconds: float = 58.0, *, style: str = "footage", mascot: bool = True,
-           providers: Callable[[], list] | None = None) -> tuple[Path, Path, float]:
+           providers: Callable[[], list] | None = None, judge: Callable[[], object] | None = None,
+           images: Callable[[], object] | None = None) -> tuple[Path, Path, float]:
+    """providers/judge/images are factories (they read secrets lazily): stock libraries, the vision check that
+    makes sure each clip fits its sentence, and the AI-image fallback. Any of them may be missing."""
     folder.mkdir(parents=True, exist_ok=True)
     rs = RenderScript.of(script)
     modern = style != "classic"
-    tones = rs.tones if modern else None
-    spoken = tts.synthesize(rs.narration_parts, voice, rate, folder / "audio", tones)
+    if modern:
+        # Sentence by sentence: each sentence is its own voice segment, so its picture cuts in exactly on it.
+        lines = rs.lines()
+        parts = [line["say"] for line in lines]
+        tones = [line["tone"] for line in lines]
+        pauses = [0.08 if i + 1 < len(lines) and lines[i + 1]["scene"] == line["scene"] else None
+                  for i, line in enumerate(lines)]
+        rs.segment_scene = [line["scene"] for line in lines]
+    else:
+        lines, parts, tones, pauses = [], rs.narration_parts, None, None
+    spoken = tts.synthesize(parts, voice, rate, folder / "audio", tones, pauses)
     if spoken.duration + builder.TAIL > max_seconds:
         log.info("voiceover %.1f s is too long; re-voicing faster", spoken.duration)
-        spoken = tts.synthesize(rs.narration_parts, voice, "+28%", folder / "audio", tones)
+        spoken = tts.synthesize(parts, voice, "+28%", folder / "audio", tones, pauses)
     if spoken.duration + builder.TAIL > max_seconds + 4:
         from ...common.errors import Permanent
 
@@ -113,19 +156,27 @@ def render(script: ScriptJSON, category_id: str, folder: Path, voice: str, rate:
     options: dict = {}
     if modern:
         stock = None
-        found = []
-        try:
-            found = providers() if providers else []
-        except Exception as exc:  # noqa: BLE001 - no key or no vault: render without clips
-            log.warning("stock footage unavailable: %s", exc)
-        if found:
+        found, judge_, images_ = [], None, None
+        for name, make in (("stock footage", providers), ("vision check", judge), ("AI images", images)):
+            try:
+                value = make() if make else None
+            except Exception as exc:  # noqa: BLE001 - a missing key just turns that part off
+                log.warning("%s unavailable: %s", name, exc)
+                value = None
+            if name == "stock footage":
+                found = value or []
+            elif name == "vision check":
+                judge_ = value
+            else:
+                images_ = value
+        if found or images_ is not None:
             portrait = getattr(rs, "format", "short") != "video"
-            stock = footage.Footage(found, folder / "clips", portrait=portrait)
-        shots = builder.build_shots(rs, spoken)
-        beats = plan_beats(shots, spoken.words, stock, rs.tags[:2])
+            stock = footage.Footage(found, folder / "clips", portrait=portrait, judge=judge_, images=images_)
+        beats = plan_beats(lines, spoken, stock, rs.tags[:2])
         if stock is not None:
             stock.write_credits(folder / "credits.json")
-            log.info("stock footage: %d clips for %d beats", len(stock.credits), len(beats))
+            log.info("visuals: %d for %d beats (vision tokens %s, AI images %s)", len(stock.credits), len(beats),
+                     getattr(judge_, "tokens", "-"), getattr(images_, "count", "-"))
         options = {"beats": beats, "mascot": mascot, "modern": True}
     video = builder.render(rs, spoken, look, folder / "video.mp4", theme, LabelledRenderer, **options)
     thumb = builder.thumbnail(rs, spoken, look, folder / "preview.jpg", theme, LabelledRenderer, **options)

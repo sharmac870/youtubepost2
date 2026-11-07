@@ -5,7 +5,8 @@ identity, cached in memory, and never written anywhere. Locally they come from e
 Secret names:
   anthropic-api-key, youtube-api-key, yt-client-id, yt-client-secret, yt-refresh-token,
   ig-access-token, meta-app-secret (optional, enables appsecret_proof),
-  pexels-api-key, pixabay-api-key (optional, stock footage for the footage render style)
+  pexels-api-key, pixabay-api-key (optional, stock footage for the footage render style),
+  fal-api-key (optional, AI images for sentences no stock clip fits)
 """
 from __future__ import annotations
 

@@ -86,7 +86,8 @@ store_secrets() {
   local vault; vault="$(output keyVaultName)"
   for pair in "anthropic-api-key:Anthropic API key" "youtube-api-key:YouTube Data API key (read-only, for trends)" \
               "ig-access-token:Instagram long-lived access token" "meta-app-secret:Meta app secret (optional)" \
-              "pexels-api-key:Pexels API key (free, for stock footage)" "pixabay-api-key:Pixabay API key (optional)"; do
+              "pexels-api-key:Pexels API key (free, for stock footage)" "pixabay-api-key:Pixabay API key (optional)" \
+              "fal-api-key:fal.ai API key (optional, AI images when no clip fits)"; do
     local name="${pair%%:*}" label="${pair#*:}" value
     read -r -s -p "$label (Enter to skip): " value; echo
     if [[ -n "$value" ]]; then

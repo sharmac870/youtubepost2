@@ -157,9 +157,11 @@ def speak(text: str, voice: str, rate: str, folder: Path, name: str,
     return samples, words
 
 
-def synthesize(parts: list[str], voice: str, rate: str, folder: Path, tones: list[str] | None = None) -> Voiceover:
+def synthesize(parts: list[str], voice: str, rate: str, folder: Path, tones: list[str] | None = None,
+               pauses: list[float | None] | None = None) -> Voiceover:
     """Voices each part. With `tones` (one per part: "hook", a scene tone, "outro"), each part gets its own pace,
-    pitch and pause; without them every part is voiced the same way with a short fixed gap."""
+    pitch and pause; without them every part is voiced the same way with a short fixed gap. `pauses` overrides
+    the pause after a part (None keeps the tone's), e.g. a short breath between sentences of one scene."""
     folder.mkdir(parents=True, exist_ok=True)
     timeline: list[np.ndarray] = []
     segments: list[Segment] = []
@@ -171,6 +173,8 @@ def synthesize(parts: list[str], voice: str, rate: str, folder: Path, tones: lis
             part_rate, pitch = shift_rate(rate, d_rate), f"{d_pitch:+d}Hz"
         else:
             part_rate, pitch, pause = rate, "+0Hz", GAP
+        if pauses and index < len(pauses) and pauses[index] is not None:
+            pause = float(pauses[index])
         gap = np.zeros(int(pause * SAMPLE_RATE), dtype=np.float32)
         samples, words = speak(text, voice, part_rate, folder, f"part{index:02d}", pitch)
         length = len(samples) / SAMPLE_RATE

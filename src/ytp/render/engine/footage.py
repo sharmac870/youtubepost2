@@ -1,4 +1,10 @@
-"""Real footage for each line of the script: free stock clips from Pexels and Pixabay, cut every 2-3 seconds.
+"""Real footage for each spoken sentence: free stock clips from Pexels and Pixabay, checked by eye.
+
+Keyword search alone gives loosely related clips, which makes the voice and the picture drift apart. So each
+sentence's candidates are LOOKED AT: a vision model (Claude Haiku, about a cent per video) scores every
+candidate's thumbnail against the sentence and its planned picture, and only a clip that clearly fits is used.
+When none fits, an AI image is generated for that sentence (fal.ai Flux, optional, about $0.003 each), and
+without that the sentence gets the drawn caption card rather than an unrelated clip.
 
 Both libraries are free for commercial use with no attribution required; every clip used is still recorded in
 credits.json next to the render (and in the render's licence_ref) so its source can be shown on request.
@@ -41,6 +47,13 @@ class Clip:
     author: str = ""
     query: str = ""
     path: str = ""    # local file once downloaded
+    thumb: str = ""   # preview image URL, for the vision check
+    score: int = -1   # the vision check's 0-10 fit to its sentence; -1 = not checked
+    said: str = ""    # the sentence it was chosen for
+
+    @property
+    def still(self) -> bool:
+        return self.path.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
 
 
 class Pexels:
@@ -64,8 +77,11 @@ class Pexels:
             good = sorted([f for f in files if short(f) >= 700], key=short) or sorted(files, key=short, reverse=True)
             if good:
                 f = good[0]
+                pictures = [p.get("picture") for p in v.get("video_pictures") or [] if p.get("picture")]
+                thumb = pictures[len(pictures) // 2] if pictures else v.get("image", "")
                 out.append(Clip(self.name, str(v["id"]), v.get("url", ""), f["link"], f["width"], f["height"],
-                                float(v.get("duration") or 0), (v.get("user") or {}).get("name", ""), query))
+                                float(v.get("duration") or 0), (v.get("user") or {}).get("name", ""), query,
+                                thumb=thumb))
         return out
 
 
@@ -87,8 +103,10 @@ class Pixabay:
                           key=lambda s: s["width"]) or sorted(sizes, key=lambda s: -s["width"])
             if good:
                 s = good[0]
+                thumbs = [x.get("thumbnail") for x in (v.get("videos") or {}).values() if x.get("thumbnail")]
                 out.append(Clip(self.name, str(v["id"]), v.get("pageURL", ""), s["url"], s["width"], s["height"],
-                                float(v.get("duration") or 0), v.get("user", ""), query))
+                                float(v.get("duration") or 0), v.get("user", ""), query,
+                                thumb=thumbs[-1] if thumbs else ""))
         if portrait:  # Pixabay has no orientation filter; prefer the tall clips.
             out.sort(key=lambda c: c.height < c.width)
         return out
@@ -103,9 +121,13 @@ class Footage:
     used: set = field(default_factory=set)
     credits: list = field(default_factory=list)
     http: httpx.Client | None = None
+    judge: object | None = None       # ClaudeJudge; None = keyword order only
+    images: object | None = None      # FalImages; None = no AI-image fallback
     _results: dict = field(default_factory=dict)
 
-    def find(self, queries: list[str], min_seconds: float = 2.0) -> Clip | None:
+    def candidates(self, queries: list[str], min_seconds: float, limit: int = 8) -> list[Clip]:
+        out: list[Clip] = []
+        seen = set(self.used)
         for query in queries:
             for provider in self.providers:
                 key = (provider.name, query)
@@ -116,12 +138,44 @@ class Footage:
                         log.warning("%s search %r failed: %s", provider.name, query, exc)
                         self._results[key] = []
                 for clip in self._results[key]:
-                    if (clip.provider, clip.id) in self.used or 0 < clip.duration < min_seconds:
+                    if (clip.provider, clip.id) in seen or 0 < clip.duration < min_seconds:
                         continue
-                    if self.download(clip):
-                        self.used.add((clip.provider, clip.id))
-                        self.credits.append(clip)
-                        return clip
+                    seen.add((clip.provider, clip.id))
+                    out.append(clip)
+                    if len(out) >= limit:
+                        return out
+        return out
+
+    def pick(self, say: str, show: str, queries: list[str], min_seconds: float = 2.0) -> Clip | None:
+        """The visual for one sentence: the best stock clip that clearly shows it, else an AI image of it,
+        else None (the renderer then shows the caption card instead of something unrelated)."""
+        queries = [q for q in queries if q]
+        clips = self.candidates(queries, min_seconds) if queries else []
+        if clips and self.judge is not None:
+            try:
+                ranked = self.judge.rank(say, show, clips)
+            except Exception as exc:  # noqa: BLE001 - judge down: don't guess, fall through to the image/card
+                log.warning("vision check failed: %s", exc)
+                ranked = []
+            order = [(clips[i], score) for i, score in ranked if score >= self.judge.min_score]
+        else:
+            order = [(c, -1) for c in clips]
+        for clip, score in order:
+            if self.download(clip):
+                clip.score, clip.said = score, say
+                self.used.add((clip.provider, clip.id))
+                self.credits.append(clip)
+                return clip
+        if self.images is not None and (show or say):
+            try:
+                image = self.images.generate(show or say, self.portrait, self.cache)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("image generation failed: %s", exc)
+                image = None
+            if image is not None:
+                image.said = say
+                self.credits.append(image)
+                return image
         return None
 
     def download(self, clip: Clip) -> bool:
@@ -152,6 +206,104 @@ class Footage:
                                    indent=1))
 
 
+JUDGE_SCHEMA = {
+    "type": "object", "additionalProperties": False, "required": ["scores"],
+    "properties": {"scores": {"type": "array", "items": {
+        "type": "object", "additionalProperties": False, "required": ["clip", "score"],
+        "properties": {"clip": {"type": "integer"}, "score": {"type": "integer"}}}}},
+}
+
+JUDGE_SYSTEM = """You are a video editor choosing b-roll for a vertical Short. You get one spoken sentence, the
+picture the writer planned for it, and numbered thumbnails of candidate stock clips. Score each clip 0-10 for how
+clearly a viewer would connect it with THAT sentence while hearing it: 9-10 shows exactly what is said, 6-8 is a
+clear, natural illustration, 3-5 is only loosely related, 0-2 is unrelated or misleading. Score text-heavy,
+watermarked, logo-led, offensive or low-quality clips 0. Output only the JSON."""
+
+
+class ClaudeJudge:
+    """Looks at candidate thumbnails and scores how well each fits its sentence (Claude, vision)."""
+
+    def __init__(self, client, model: str, min_score: int = 6, http: httpx.Client | None = None,
+                 on_usage: Callable[[int, int], None] | None = None):
+        self.client = client
+        self.model = model
+        self.min_score = min_score
+        self.on_usage = on_usage   # counts the tokens against the daily LLM spend cap
+        self.http = http or httpx.Client(timeout=20, follow_redirects=True)
+        self.tokens = 0
+
+    def _image(self, url: str) -> str | None:
+        import base64
+        import io
+
+        try:
+            r = self.http.get(url)
+            r.raise_for_status()
+            img = Image.open(io.BytesIO(r.content)).convert("RGB")
+            img.thumbnail((320, 320))
+            buf = io.BytesIO()
+            img.save(buf, "JPEG", quality=80)
+            return base64.b64encode(buf.getvalue()).decode()
+        except Exception as exc:  # noqa: BLE001
+            log.info("thumbnail %s unavailable: %s", url, exc)
+            return None
+
+    def rank(self, say: str, show: str, clips: list[Clip]) -> list[tuple[int, int]]:
+        content: list[dict] = [{"type": "text", "text": f"Sentence: {say}\nPlanned picture: {show or '(none)'}"}]
+        shown = []
+        for i, clip in enumerate(clips):
+            data = self._image(clip.thumb) if clip.thumb else None
+            if data:
+                shown.append(i)
+                content += [{"type": "text", "text": f"Clip {i}:"},
+                            {"type": "image", "source": {"type": "base64", "media_type": "image/jpeg", "data": data}}]
+        if not shown:
+            return []
+        response = self.client.messages.create(
+            model=self.model, max_tokens=400, system=JUDGE_SYSTEM, messages=[{"role": "user", "content": content}],
+            output_config={"effort": "low", "format": {"type": "json_schema", "schema": JUDGE_SCHEMA}})
+        usage = getattr(response, "usage", None)
+        tin, tout = int(getattr(usage, "input_tokens", 0) or 0), int(getattr(usage, "output_tokens", 0) or 0)
+        self.tokens += tin + tout
+        if self.on_usage:
+            self.on_usage(tin, tout)
+        text = next((b.text for b in response.content if getattr(b, "type", "") == "text"), "{}")
+        scores = {int(s["clip"]): max(0, min(10, int(s["score"]))) for s in json.loads(text).get("scores", [])
+                  if int(s.get("clip", -1)) in shown}
+        return sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
+
+
+class FalImages:
+    """An AI image for a sentence no stock clip fits (fal.ai Flux schnell, about $0.003 an image)."""
+
+    URL = "https://fal.run/fal-ai/flux/schnell"
+    STYLE = (", photorealistic, natural light, vertical composition, no text, no logos, no watermark, "
+             "no recognisable real person")
+
+    def __init__(self, api_key: str, http: httpx.Client | None = None):
+        self.key = api_key
+        self.http = http or httpx.Client(timeout=90, follow_redirects=True)
+        self.count = 0
+
+    def generate(self, prompt: str, portrait: bool, cache: Path) -> Clip | None:
+        r = self.http.post(self.URL, headers={"Authorization": f"Key {self.key}"},
+                           json={"prompt": prompt[:300] + self.STYLE, "num_images": 1,
+                                 "image_size": "portrait_16_9" if portrait else "landscape_16_9",
+                                 "enable_safety_checker": True})
+        r.raise_for_status()
+        images = r.json().get("images") or []
+        if not images:
+            return None
+        url = images[0]["url"]
+        img = self.http.get(url)
+        img.raise_for_status()
+        cache.mkdir(parents=True, exist_ok=True)
+        path = cache / f"ai-{hashlib.sha1(prompt.encode()).hexdigest()[:16]}.jpg"
+        Image.open(__import__("io").BytesIO(img.content)).convert("RGB").save(path, quality=92)
+        self.count += 1
+        return Clip("fal-flux", path.stem, "", url, 0, 0, 0.0, "AI-generated", prompt[:60], str(path))
+
+
 def providers_from(pexels_key: str = "", pixabay_key: str = "") -> list:
     out = []
     if pexels_key:
@@ -175,8 +327,10 @@ class ClipReader:
         self.last: Image.Image | None = None
         vf = (f"scale={self.w2}:{self.h2}:force_original_aspect_ratio=increase,crop={self.w2}:{self.h2},"
               f"fps={FPS},eq=saturation=1.12:contrast=1.04")
+        still = path.lower().endswith((".jpg", ".jpeg", ".png", ".webp"))
+        source = ["-loop", "1", "-i", path] if still else ["-stream_loop", "-1", "-ss", f"{start:.2f}", "-i", path]
         self.proc = subprocess.Popen(
-            [ffmpeg(), "-v", "error", "-stream_loop", "-1", "-ss", f"{start:.2f}", "-i", path, "-t", f"{seconds + 0.5:.2f}",
+            [ffmpeg(), "-v", "error", *source, "-t", f"{seconds + 0.5:.2f}",
              "-an", "-vf", vf, "-f", "rawvideo", "-pix_fmt", "rgb24", "-"],
             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
 

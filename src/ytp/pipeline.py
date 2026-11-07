@@ -83,7 +83,27 @@ def default_services(rt: Runtime) -> Services:
 
         return providers_from(sec.get("pexels-api-key", required=False), sec.get("pixabay-api-key", required=False))
 
-    renderer = functools.partial(engine.render, style=s.render_style, mascot=s.mascot, providers=stock)
+    def judge():
+        if not s.footage_vision_check:
+            return None
+        from .common.repo import ist_day
+        from .render.engine.footage import ClaudeJudge
+
+        def charge(tin: int, tout: int) -> None:
+            usd = tin / 1e6 * s.llm_price_in_per_mtok + tout / 1e6 * s.llm_price_out_per_mtok
+            repo.ledger_add(ist_day(), "spend_inr", usd * s.usd_to_inr)
+            repo.ledger_add(ist_day(), "llm_tokens", tin + tout)
+
+        return ClaudeJudge(llm(), s.anthropic_model, s.footage_min_score, on_usage=charge)
+
+    def images():
+        from .render.engine.footage import FalImages
+
+        key = sec.get("fal-api-key", required=False)
+        return FalImages(key) if key else None
+
+    renderer = functools.partial(engine.render, style=s.render_style, mascot=s.mascot, providers=stock,
+                                 judge=judge, images=images)
 
     return Services(trends=lambda: YouTubeTrends(sec.get("youtube-api-key")),
                     news=lambda: GoogleNews() if s.news_context else None, llm=llm, renderer=renderer,

@@ -79,6 +79,11 @@ class Settings(BaseSettings):
     # the footage style still renders, on the drawn background.
     render_style: Literal["footage", "classic"] = "footage"
     mascot: bool = True                  # the lip-synced cartoon host (footage style only)
+    # Claude looks at each sentence's candidate clips and only a clip scoring at least footage_min_score (0-10)
+    # is used; about 1-2 cents a video on Haiku, counted in the daily spend cap. Optional fal-api-key adds an
+    # AI image (about $0.003) for sentences no clip fits; without it they get the caption card.
+    footage_vision_check: bool = True
+    footage_min_score: int = Field(6, ge=0, le=10)
     render_timeout_s: int = 1200
     max_video_seconds: float = 58.0
 
