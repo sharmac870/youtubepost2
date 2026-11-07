@@ -11,7 +11,7 @@ from ytp.pipeline import Pipeline
 
 
 def make(tmp_path, monkeypatch, **kw):
-    settings = Settings(_env_file=None, backend="local", data_dir=tmp_path, **kw)
+    settings = Settings(_env_file=None, backend="local", data_dir=tmp_path, **{"platforms": ["YOUTUBE", "INSTAGRAM"], **kw})
     rt = build(settings)
     monkeypatch.setattr(console, "runtime", lambda: rt)
     return rt, TestClient(console.app)

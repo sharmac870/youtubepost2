@@ -101,8 +101,7 @@ class Pipeline:
         return str(self.repo.flag("yt_privacy_status", self.s.yt_privacy_status))
 
     def enabled_platforms(self, item: dict) -> list[str]:
-        """The item's platforms that are still switched on (PLATFORMS). Items created while a platform was on
-        stop waiting for it once it is switched off."""
+        """The item's platforms that are still switched on (PLATFORMS); a platform switched off later is ignored."""
         return [p for p in (item.get("platforms") or "").split(",") if p and p in self.s.platforms]
 
     def script_of(self, content_id: str, item: dict | None = None) -> ScriptJSON:
@@ -353,14 +352,14 @@ class Pipeline:
         item = self.repo.item(cid)
         if not item or item["state"] not in (State.PUBLISHING, State.PARTIALLY_PUBLISHED):
             raise StaleState(f"{cid} not publishing")
+        if platform not in self.s.platforms:   # switched off after this item was queued
+            self.finalize(cid)
+            raise StaleState(f"{platform} publishing is switched off")
         pub = self.repo.pub(cid, platform)
         if not pub or pub["state"] in (PubState.LIVE, PubState.FAILED, PubState.REMOVED):
             if pub and pub["state"] == PubState.LIVE:
                 self.finalize(cid)
             raise StaleState(f"{cid} {platform} already {pub and pub['state']}")
-        if platform not in self.s.platforms:
-            self.finalize(cid)
-            raise StaleState(f"{cid}: publishing to {platform} is switched off (PLATFORMS)")
         # Fail closed: kill switch, revoked credential, missing QA all stop publishing.
         if self.kill_switch():
             raise Defer("kill switch is on", 900)
@@ -575,8 +574,9 @@ class Pipeline:
                     expired += 1
                 except StaleState:
                     pass
-            elif item["state"] in (State.PUBLISHING, State.PARTIALLY_PUBLISHED):
-                self.finalize(item["PartitionKey"])   # settles items left waiting on a platform now switched off
+        for item in self.repo.items():   # items whose last platform message was lost or switched off
+            if item["state"] in (State.PUBLISHING, State.PARTIALLY_PUBLISHED):
+                self.finalize(item["PartitionKey"])
         previews = self.queue_missing_previews()
         refreshed = self.refresh_metrics()
         channel = self.refresh_channel()

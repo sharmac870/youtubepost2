@@ -78,7 +78,7 @@ class Settings(BaseSettings):
     max_video_seconds: float = 58.0
 
     # Publishing
-    platforms: Annotated[list[Literal["YOUTUBE", "INSTAGRAM"]], NoDecode] = ["YOUTUBE", "INSTAGRAM"]
+    platforms: Annotated[list[Literal["YOUTUBE", "INSTAGRAM"]], NoDecode] = ["YOUTUBE"]
     publish_kill_switch: bool = False    # the console can also flip this at run time
     yt_channel_handle: str = "@chansharma870"
     yt_privacy_status: Literal["private", "unlisted", "public"] = "private"  # weeks 1-2 of LLD 11.3

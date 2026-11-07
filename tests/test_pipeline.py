@@ -245,7 +245,7 @@ def test_previews_can_be_turned_off(tmp_path):
     from ytp.fakes import fake_services
     from ytp.pipeline import Pipeline
 
-    rt = build(Settings(_env_file=None, backend="local", data_dir=tmp_path, preview_before_approval=False))
+    rt = build(Settings(_env_file=None, backend="local", data_dir=tmp_path, preview_before_approval=False, platforms=["YOUTUBE", "INSTAGRAM"]))
     pipeline = Pipeline(rt, fake_services())
     for item in run_to_approval(pipeline, rt):
         assert not item.get("media")
@@ -257,7 +257,7 @@ def test_sweep_backfills_previews_for_older_drafts(tmp_path):
     from ytp.fakes import fake_services
     from ytp.pipeline import Pipeline
 
-    rt = build(Settings(_env_file=None, backend="local", data_dir=tmp_path, preview_before_approval=False))
+    rt = build(Settings(_env_file=None, backend="local", data_dir=tmp_path, preview_before_approval=False, platforms=["YOUTUBE", "INSTAGRAM"]))
     run_to_approval(Pipeline(rt, fake_services()), rt)
     rt.settings.preview_before_approval = True
     pipeline = Pipeline(rt, fake_services())
@@ -287,3 +287,23 @@ def test_secret_values_lose_pasted_quotes(monkeypatch):
 
     monkeypatch.setenv("IG_ACCESS_TOKEN", ' "IGAAtoken"\n')
     assert Secrets().get("ig-access-token") == "IGAAtoken"
+
+
+def test_switching_instagram_off_finishes_items_stuck_on_it(pipeline, rt, services):
+    rt.repo.set_flag("credential_INSTAGRAM", "REVOKED", "pipeline")
+    cid = run_to_approval(pipeline, rt)[0]["PartitionKey"]
+    pipeline.approve(cid, "r")
+    pipeline.work(ALL_QUEUES)
+    assert rt.repo.item(cid)["state"] == State.PUBLISHING          # YouTube live, Instagram waiting
+    assert rt.repo.pub(cid, "YOUTUBE")["state"] == PubState.LIVE
+    pipeline.s.platforms = ["YOUTUBE"]
+    pipeline.sweep()
+    assert rt.repo.item(cid)["state"] == State.PUBLISHED
+    pipeline.discover("k-yt-only")
+    assert {i["platforms"] for i in rt.repo.items() if i["run_key"] == "k-yt-only"} == {"YOUTUBE"}
+
+
+def test_default_is_youtube_only():
+    from ytp.common.config import Settings
+
+    assert Settings(_env_file=None).platforms == ["YOUTUBE"]

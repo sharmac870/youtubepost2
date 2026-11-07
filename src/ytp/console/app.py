@@ -132,7 +132,7 @@ def snapshot(rt: Runtime) -> list[dict]:
     out = []
     for cid, item in items.items():
         p = {}
-        for platform in ("YOUTUBE", "INSTAGRAM"):
+        for platform in rt.settings.platforms:
             pub, m = pubs[cid].get(platform), metrics[cid].get(platform, {})
             if pub or platform in (item.get("platforms") or ""):
                 p[platform] = {"state": pub["state"] if pub else "", "url": (pub or {}).get("url", ""),
