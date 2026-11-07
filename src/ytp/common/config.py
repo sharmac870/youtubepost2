@@ -62,6 +62,7 @@ class Settings(BaseSettings):
     # Policy and approval (LLD Section 11)
     auto_approve_categories: Csv = []
     approval_ttl_hours: int = 6
+    preview_before_approval: bool = True   # render each draft's video before review; Approve reuses it
     deny_topics: Csv = [
         "election", "elections", "lok sabha", "vidhan sabha", "bjp", "congress party", "campaign rally", "exit poll",
         "communal", "riot", "mob lynching", "temple mosque", "hindu muslim", "terror attack", "blast",

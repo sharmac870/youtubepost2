@@ -13,6 +13,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, Callable
 
 from .common import logs
@@ -182,7 +183,15 @@ class Pipeline:
         else:
             expires = iso(now() + timedelta(hours=self.s.approval_ttl_hours))
             self.repo.transition(cid, State.SCRIPTED, State.AWAITING_APPROVAL, "policy:gate", details,
-                                 {**fields, "expires_at": expires}, [("upsert", row)])
+                                 {**fields, "expires_at": expires}, [("upsert", row)],
+                                 enqueue=self._preview(cid, 1))
+
+    def _preview(self, cid: str, script_version: int) -> list[tuple[str, str, dict]]:
+        """A preview render for a draft, so the reviewer watches the real video before approving."""
+        if not self.s.preview_before_approval:
+            return []
+        return [(Q_RENDER, f"preview{script_version}", {"content_id": cid, "preview": True,
+                                                        "script_version": script_version})]
 
     # ----- operator actions (called by the console) -----
 
@@ -215,8 +224,9 @@ class Pipeline:
         self.repo.transition(cid, state, State.AWAITING_APPROVAL, actor,
                              {"edited_fields": sorted(set(changes) & allowed), "script_version": version},
                              {"script_version": version, "title": script.title,
-                              "expires_at": iso(now() + timedelta(hours=self.s.approval_ttl_hours))},
-                             [("insert", row)])
+                              "expires_at": iso(now() + timedelta(hours=self.s.approval_ttl_hours)),
+                              "media": ""},
+                             [("insert", row)], enqueue=self._preview(cid, version))
         return script
 
     def retry(self, cid: str, actor: str, platform: str | None = None) -> None:
@@ -239,25 +249,13 @@ class Pipeline:
 
     # ----- stage: render + QA -----
 
-    def handle_render(self, body: dict) -> None:
-        cid = body["content_id"]
-        item = self.repo.item(cid)
-        if not item or item["state"] not in (State.APPROVED, State.RENDERING):
-            raise StaleState(f"{cid} not ready to render")
-        if item["state"] == State.APPROVED:
-            item = self.repo.transition(cid, State.APPROVED, State.RENDERING, "pipeline:render")
+    def _render_media(self, cid: str, item: dict, version: int):
+        """Renders the script version and runs QA. Returns (render, report), or raises Permanent."""
         script = self.script_of(cid, item)
-        version = int(item.get("script_version", 1))
         with tempfile.TemporaryDirectory(prefix="render-") as tmp:
             started = time.monotonic()
-            try:
-                video, thumb, seconds = self.services.renderer(script, item.get("category_id", ""), Path(tmp),
-                                                               self.s.tts_voice, self.s.tts_rate,
-                                                               self.s.max_video_seconds)
-            except Permanent as exc:
-                self.repo.transition(cid, State.RENDERING, State.FAILED, "pipeline:render", {"error": str(exc)},
-                                     {"last_error": str(exc)[:300]})
-                return
+            video, thumb, seconds = self.services.renderer(script, item.get("category_id", ""), Path(tmp),
+                                                           self.s.tts_voice, self.s.tts_rate, self.s.max_video_seconds)
             blob = f"{cid}/v{version}.mp4"
             self.rt.media.put(blob, video)
             self.rt.media.put(f"{cid}/v{version}.jpg", thumb, "image/jpeg")
@@ -265,17 +263,69 @@ class Pipeline:
             render = {"blob": blob, "thumb": f"{cid}/v{version}.jpg", "sha256": sha, "seconds": seconds,
                       "size": Path(video).stat().st_size, "render_s": round(time.monotonic() - started, 1),
                       "script_version": version, "engine": "pillow-ffmpeg", "licence_ref": "generated; synthesized music"}
-            row = {"PartitionKey": cid, "RowKey": "render", "data": json.dumps(render)}
-            self.repo.transition(cid, State.RENDERING, State.RENDERED, "pipeline:render",
-                                 {"sha256": sha, "seconds": seconds}, {"media": blob}, [("upsert", row)])
             report = self.services.qa(Path(video), max_seconds=90)
-        qa_row = {"PartitionKey": cid, "RowKey": "qa", "data": json.dumps(report.__dict__)}
+        return render, report
+
+    def handle_render(self, body: dict) -> None:
+        if body.get("preview"):
+            return self.handle_preview(body)
+        cid = body["content_id"]
+        item = self.repo.item(cid)
+        if not item or item["state"] not in (State.APPROVED, State.RENDERING):
+            raise StaleState(f"{cid} not ready to render")
+        if item["state"] == State.APPROVED:
+            item = self.repo.transition(cid, State.APPROVED, State.RENDERING, "pipeline:render")
+        version = int(item.get("script_version", 1))
+        render, qa = self.repo.json_row(cid, "render"), self.repo.json_row(cid, "qa")
+        reused = bool(render and qa and render.get("script_version") == version and qa.get("passed")
+                      and item.get("media") == render.get("blob"))
+        if reused:
+            report = SimpleNamespace(**{"problems": [], **qa})
+            qa_row = {"PartitionKey": cid, "RowKey": "qa", "data": json.dumps(qa)}
+        else:
+            try:
+                render, report = self._render_media(cid, item, version)
+            except Permanent as exc:
+                self.repo.transition(cid, State.RENDERING, State.FAILED, "pipeline:render", {"error": str(exc)},
+                                     {"last_error": str(exc)[:300]})
+                return
+            qa_row = {"PartitionKey": cid, "RowKey": "qa", "data": json.dumps(report.__dict__)}
+        row = {"PartitionKey": cid, "RowKey": "render", "data": json.dumps(render)}
+        self.repo.transition(cid, State.RENDERING, State.RENDERED, "pipeline:render",
+                             {"sha256": render["sha256"], "seconds": render["seconds"], "reused_preview": reused},
+                             {"media": render["blob"]}, [("upsert", row)])
         if not report.passed:
             self.repo.transition(cid, State.RENDERED, State.FAILED, "pipeline:qa", {"problems": report.problems},
                                  {"last_error": "QA: " + "; ".join(report.problems)[:280]}, [("upsert", qa_row)])
             return
         self.repo.transition(cid, State.RENDERED, State.QA_PASSED, "pipeline:qa", {}, {}, [("upsert", qa_row)])
         self.start_publishing(cid, State.QA_PASSED)
+
+    def handle_preview(self, body: dict) -> None:
+        """Renders a draft's video before approval. No state change: Approve later reuses it if the script
+        version is unchanged; an edit queues a fresh preview."""
+        cid, version = body["content_id"], int(body.get("script_version", 1))
+        item = self.repo.item(cid)
+        if not item or item["state"] not in (State.AWAITING_APPROVAL, State.EXPIRED) \
+                or int(item.get("script_version", 1)) != version:
+            raise StaleState(f"{cid} preview v{version} no longer needed")
+        existing = self.repo.json_row(cid, "render")
+        if existing and existing.get("script_version") == version and item.get("media") == existing.get("blob"):
+            return
+        try:
+            render, report = self._render_media(cid, item, version)
+        except Permanent as exc:
+            self.repo.audit(cid, "pipeline:preview", "preview failed", {"error": str(exc)[:300]})
+            return
+        rows = [("upsert", {"PartitionKey": cid, "RowKey": "render", "data": json.dumps(render)}),
+                ("upsert", {"PartitionKey": cid, "RowKey": "qa", "data": json.dumps(report.__dict__)})]
+        latest = self.repo.item(cid) or {}
+        if latest.get("state") not in (State.AWAITING_APPROVAL, State.EXPIRED) or \
+                int(latest.get("script_version", 1)) != version:
+            return   # approved or edited meanwhile; the main render or a newer preview takes over
+        self.repo.update_fields(cid, {"media": render["blob"]}, rows)
+        self.repo.audit(cid, "pipeline:preview", "preview rendered",
+                        {"seconds": render["seconds"], "qa": "passed" if report.passed else report.problems})
 
     def start_publishing(self, cid: str, from_state: State) -> None:
         item = self.repo.item(cid) or {}
@@ -519,9 +569,24 @@ class Pipeline:
                     pass
             elif item["state"] in (State.PUBLISHING, State.PARTIALLY_PUBLISHED):
                 self.finalize(item["PartitionKey"])   # settles items left waiting on a platform now switched off
+        previews = self.queue_missing_previews()
         refreshed = self.refresh_metrics()
         channel = self.refresh_channel()
-        return {"relayed": relayed, "expired": expired, "metrics": refreshed, "channel": channel}
+        return {"relayed": relayed, "expired": expired, "previews": previews, "metrics": refreshed, "channel": channel}
+
+    def queue_missing_previews(self) -> int:
+        """Drafts written before previews existed, or whose preview message was lost, get one (at most hourly)."""
+        if not self.s.preview_before_approval:
+            return 0
+        count, cutoff = 0, iso(now() - timedelta(hours=1))
+        for item in self.repo.items():
+            if item["state"] != State.AWAITING_APPROVAL or item.get("media") or item.get("preview_requested_at", "") > cutoff:
+                continue
+            cid, version = item["PartitionKey"], int(item.get("script_version", 1) or 1)
+            self.repo.update_fields(cid, {"preview_requested_at": iso()})
+            self.rt.queues.send(Q_RENDER, {"content_id": cid, "preview": True, "script_version": version})
+            count += 1
+        return count
 
     def refresh_channel(self, force: bool = False) -> bool:
         """Whole-channel analytics (all uploads, not only ours), at most every channel_stats_every_hours."""

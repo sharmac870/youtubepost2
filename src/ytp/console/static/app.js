@@ -326,7 +326,7 @@ function openThemeForm() {
 async function renderReview(main) {
   const r = await api("/api/items?state=AWAITING_APPROVAL,EXPIRED&limit=50");
   const head = h("div", { class: "toolbar" }, h("h1", {}, "Review"),
-    h("span", { class: "muted" }, "Approve to render and publish. Drafts expire 6 hours after they're written; expired ones can still be approved."),
+    h("span", { class: "muted" }, "Watch the preview, then approve to publish. Drafts expire 6 hours after they're written; expired ones can still be approved."),
     h("div", { class: "spacer" }), h("button", { class: "btn", onclick: openThemeForm }, "Create from theme"),
     h("button", { class: "btn", onclick: discoverNow }, "Find trends now"));
   if (!r.items.length) {
@@ -343,12 +343,14 @@ function reviewCard(d) {
   const trend = d.trend || {};
   const card = h("div", { class: "card review" });
   const actions = h("div", { class: "actions" },
-    h("button", { class: "btn primary", onclick: () => act(it.id, "approve", null, "Approved: rendering now") }, "Approve"),
+    h("button", { class: "btn primary", onclick: () => act(it.id, "approve", null, "Approved: publishing in a few minutes") }, "Approve"),
     h("button", { class: "btn", onclick: () => openItem(it.id, true) }, "Edit"),
     h("button", { class: "btn danger", onclick: () => { const reason = prompt("Why reject? (kept in the audit log)"); if (reason !== null) act(it.id, "reject", { reason }, "Rejected"); } }, "Reject"),
     h("button", { class: "btn", onclick: () => openItem(it.id) }, "Details"));
   card.append(
-    h("div", { class: "poster" }, h("div", {}, h("div", { style: "font-weight:700;font-size:15px;color:var(--text-primary)" }, sc.hook_text || ""), h("div", { style: "margin-top:8px" }, "Video renders after approval"))),
+    d.has_video
+      ? h("div", { class: "poster" }, h("video", { src: `/api/items/${it.id}/video`, controls: true, preload: "metadata", poster: `/api/items/${it.id}/thumb` }))
+      : h("div", { class: "poster" }, h("div", {}, h("div", { style: "font-weight:700;font-size:15px;color:var(--text-primary)" }, sc.hook_text || ""), h("div", { style: "margin-top:8px" }, "Preview video is being made. Refresh in a few minutes."))),
     h("div", {},
       h("h2", {}, sc.title || it.title),
       h("div", { class: "meta" }, statePill(it.state), pill(it.category || "Uncategorised", ""),
@@ -428,7 +430,7 @@ function itemView(d) {
   const it = d.item, sc = d.script?.script || {}, admin = state.me?.admin;
   const media = d.has_video
     ? h("div", { class: "poster" }, h("video", { src: `/api/items/${it.id}/video`, controls: true, preload: "metadata", poster: `/api/items/${it.id}/thumb` }))
-    : h("div", { class: "poster" }, "No video yet");
+    : h("div", { class: "poster" }, ["AWAITING_APPROVAL", "EXPIRED"].includes(it.state) ? "Preview video is being made. Refresh in a few minutes." : "No video yet");
   const actions = h("div", { class: "actions" });
   if (["AWAITING_APPROVAL", "EXPIRED"].includes(it.state)) {
     actions.append(h("button", { class: "btn primary", onclick: () => act(it.id, "approve", null, "Approved") }, "Approve"),

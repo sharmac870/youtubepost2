@@ -199,3 +199,69 @@ def test_switching_a_platform_off_releases_items_waiting_on_it(pipeline, rt):
     assert rt.repo.item(cid)["state"] == State.PUBLISHED
     # The deferred Instagram message is dropped instead of retried, and nothing is posted there.
     assert rt.repo.pub(cid, "INSTAGRAM")["state"] != PubState.LIVE
+
+
+def test_drafts_get_a_preview_video_and_approve_reuses_it(rt):
+    from ytp.fakes import fake_render, fake_services
+    from ytp.pipeline import Pipeline
+
+    calls = []
+
+    def counting_render(*a, **k):
+        calls.append(1)
+        return fake_render(*a, **k)
+
+    services = fake_services()
+    services.renderer = counting_render
+    pipeline = Pipeline(rt, services)
+    cid = run_to_approval(pipeline, rt)[0]["PartitionKey"]
+    item = rt.repo.item(cid)
+    assert item["state"] == State.AWAITING_APPROVAL and item["media"]          # preview made before review
+    assert rt.repo.json_row(cid, "qa")["passed"] and len(calls) == 2           # one preview per draft
+    pipeline.approve(cid, "reviewer@example.com")
+    pipeline.work(ALL_QUEUES)
+    assert rt.repo.item(cid)["state"] == State.PUBLISHED and len(calls) == 2   # approve reused the preview
+    events = [e["action"] for e in rt.repo.audit_events(cid)]
+    assert "preview rendered" in events
+
+
+def test_edit_makes_a_new_preview_and_old_one_is_not_published(rt):
+    from ytp.fakes import fake_services
+    from ytp.pipeline import Pipeline
+
+    pipeline = Pipeline(rt, fake_services())
+    cid = run_to_approval(pipeline, rt)[0]["PartitionKey"]
+    first = rt.repo.item(cid)["media"]
+    pipeline.edit(cid, "editor", {"title": "A sharper, human-edited title for today"})
+    assert rt.repo.item(cid)["media"] == ""                                     # old preview no longer shown
+    pipeline.work(ALL_QUEUES)
+    item = rt.repo.item(cid)
+    assert item["media"] and item["media"] != first and item["media"].endswith("v2.mp4")
+
+
+def test_previews_can_be_turned_off(tmp_path):
+    from ytp.common.config import Settings
+    from ytp.common.runtime import build
+    from ytp.fakes import fake_services
+    from ytp.pipeline import Pipeline
+
+    rt = build(Settings(_env_file=None, backend="local", data_dir=tmp_path, preview_before_approval=False))
+    pipeline = Pipeline(rt, fake_services())
+    for item in run_to_approval(pipeline, rt):
+        assert not item.get("media")
+
+
+def test_sweep_backfills_previews_for_older_drafts(tmp_path):
+    from ytp.common.config import Settings
+    from ytp.common.runtime import build
+    from ytp.fakes import fake_services
+    from ytp.pipeline import Pipeline
+
+    rt = build(Settings(_env_file=None, backend="local", data_dir=tmp_path, preview_before_approval=False))
+    run_to_approval(Pipeline(rt, fake_services()), rt)
+    rt.settings.preview_before_approval = True
+    pipeline = Pipeline(rt, fake_services())
+    assert pipeline.sweep()["previews"] == 2
+    assert pipeline.sweep()["previews"] == 0                     # not re-queued within the hour
+    pipeline.work(ALL_QUEUES)
+    assert all(i.get("media") for i in drafts(rt))
