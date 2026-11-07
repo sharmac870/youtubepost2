@@ -1,0 +1,38 @@
+flowchart TB
+  subgraph GH["GitHub&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"]
+    ci["GitHub Actions<br/>test, SBOM, scan, sign<br/><i>OIDC, no stored secrets</i>"]
+  end
+  subgraph AZ["Azure · Central India&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"]
+    acr["Container Registry<br/><i>signed, digest-pinned</i>"]
+    fd["Front Door + WAF<br/><i>console only</i>"]
+    subgraph VNET["VNet 10.40.0.0/16&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"]
+      subgraph ENV["ACA env&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"]
+        direction LR
+        job["Job: discovery<br/>cron 0 */4 * * *"]
+        wk["Workers<br/>script, render, publish<br/>KEDA on queue depth"]
+        osh["OpenShorts<br/>internal ingress"]
+        con["Review Console<br/>Entra ID auth"]
+      end
+      subgraph PE["Private link&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"]
+        direction LR
+        pe1[("PostgreSQL<br/>Flexible")]
+        pe2[("Key Vault")]
+        pe3[("Blob<br/>Storage")]
+        pe4[("Service Bus<br/>Premium")]
+      end
+      nat["NAT Gateway<br/>static egress IP"]
+    end
+    law["Log Analytics<br/>+ App Insights"]
+  end
+  inet(["Internet APIs: YouTube, Meta,<br/>Anthropic, ElevenLabs, Pexels"])
+  ci -- "push image" --> acr
+  ci -- "deploy revision" --> ENV
+  acr -- "pull by digest" --> ENV
+  fd --> con
+  ENV -- "private link" --> PE
+  ENV --> nat --> inet
+  ENV -. "OTel" .-> law
+  classDef core fill:#1F3A5F,stroke:#0F2440,color:#fff
+  classDef data fill:#FFF4E0,stroke:#C98A1B,color:#3D2A05
+  class job,wk,osh,con core
+  class pe1,pe2,pe3,pe4 data

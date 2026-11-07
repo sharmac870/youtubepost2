@@ -1,0 +1,24 @@
+flowchart LR
+  op["Channel Operator<br/><i>configures, reviews, approves</i>"]
+  sys["<b>India Trending Shorts Pipeline</b><br/>Event-driven content automation<br/><i>Azure Container Apps</i>"]
+  yt["<b>YouTube Data API v3</b><br/>trending discovery and Shorts upload<br/>@chansharma870"]
+  ig["<b>Instagram Graph API</b><br/>Reels content publishing<br/>@Sharmac_870"]
+  llm["<b>Anthropic Claude API</b><br/>script generation and policy review"]
+  tts["<b>ElevenLabs</b><br/>text-to-speech, en-IN voice"]
+  stock["<b>Pexels API</b><br/>licensed stock footage"]
+  alert["<b>Alerting</b><br/>email / Teams / PagerDuty"]
+  op -- "HTTPS + Entra ID SSO" --> sys
+  sys -- "videos.list chart=mostPopular regionCode=IN" --> yt
+  sys -- "videos.insert resumable upload" --> yt
+  sys -- "Messages API, structured output" --> llm
+  sys -- "TTS synthesis" --> tts
+  sys -- "search + download clips" --> stock
+  sys -- "media container + media_publish" --> ig
+  sys -- "alerts, approval requests" --> alert
+  alert -.-> op
+  classDef core fill:#1F3A5F,stroke:#0F2440,color:#ffffff,stroke-width:2px
+  classDef ext fill:#EEF3F8,stroke:#5B7A99,color:#13263B
+  classDef person fill:#FFF4E0,stroke:#C98A1B,color:#3D2A05
+  class sys core
+  class yt,ig,llm,tts,stock,alert ext
+  class op person

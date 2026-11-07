@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+.data/
+.env*
+!.env.example
+client_secret*.json
+out/
+.pytest_cache/
+.ruff_cache/
+infra/allowed-users.txt

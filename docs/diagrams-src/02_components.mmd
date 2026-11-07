@@ -1,0 +1,42 @@
+flowchart TB
+  sched["Scheduler<br/><i>ACA Job, cron every 4 h</i>"]
+  subgraph W1["Stage 1 · Discover&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"]
+    disc["TrendDiscoveryService<br/><i>YouTube Data API, dedupe, scoring</i>"]
+    script["ScriptGenEngine<br/><i>Claude, structured output</i>"]
+    policy["ContentPolicyGate<br/><i>rules + LLM moderation</i>"]
+  end
+  console["Review Console<br/><i>human approval, Entra ID SSO</i>"]
+  subgraph W2["Stage 2 · Render&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"]
+    render["RenderOrchestrator"]
+    osh["OpenShorts Engine<br/><i>internal ingress only</i>"]
+    qa["MediaQAService<br/><i>ffprobe spec checks</i>"]
+  end
+  subgraph W3["Stage 3 · Publish&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"]
+    pyt["YouTubePublisher"]
+    pig["InstagramPublisher"]
+    tok["TokenManager"]
+  end
+  subgraph DS["Data · private endpoints&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"]
+    db[("PostgreSQL<br/>state, outbox, audit")]
+    blob[("Blob Storage<br/>private media")]
+    kv[("Key Vault<br/>tokens, API keys")]
+  end
+  sched --> disc --> script --> policy
+  policy -- "needs review" --> console
+  policy -- "q.render<br/>auto-approved" --> render
+  console -- "q.render<br/>approved" --> render
+  render <--> osh
+  osh --> blob
+  render --> qa
+  qa -- "q.publish.youtube" --> pyt
+  qa -- "q.publish.instagram" --> pig
+  pyt --> tok
+  pig --> tok
+  tok --> kv
+  W1 & W2 & W3 -. "state transitions" .-> db
+  classDef w fill:#1F3A5F,stroke:#0F2440,color:#fff
+  classDef c fill:#EEF3F8,stroke:#5B7A99,color:#13263B
+  classDef d fill:#FFF4E0,stroke:#C98A1B,color:#3D2A05
+  class disc,script,policy,render,osh,qa,pyt,pig,tok w
+  class sched,console c
+  class db,blob,kv d

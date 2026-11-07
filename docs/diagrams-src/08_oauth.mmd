@@ -1,0 +1,30 @@
+sequenceDiagram
+  autonumber
+  participant Op as Operator
+  participant CLI as Bootstrap CLI (one-time, local)
+  participant G as Google OAuth
+  participant MB as Meta Business Manager
+  participant KV as Key Vault
+  participant TM as TokenManager
+  participant API as Platform APIs
+  rect rgb(238,243,248)
+  Note over Op,KV: One-time onboarding (per account)
+  Op->>CLI: run auth bootstrap
+  CLI->>G: auth code + PKCE, scope youtube.upload + youtube.readonly
+  G-->>CLI: refresh_token
+  CLI->>KV: set secret yt-refresh-token (never written to disk)
+  Op->>MB: create System User, assign IG asset, generate token
+  Op->>KV: set secret ig-system-user-token
+  end
+  rect rgb(255,244,224)
+  Note over TM,API: Runtime (every publish)
+  TM->>KV: get secret via managed identity
+  TM->>G: refresh → access_token (≈1 h)
+  TM->>TM: cache in memory until expiry − 5 min
+  TM->>API: call with Bearer token
+  alt 401 invalid_grant / OAuthException 190
+    TM->>TM: mark credential REVOKED in DB
+    TM-->>Op: P1 alert: re-run bootstrap
+  end
+  end
+  Note over TM: Daily check: debug_token / tokeninfo, alert 14 days before expiry

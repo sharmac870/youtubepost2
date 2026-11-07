@@ -1,0 +1,21 @@
+stateDiagram-v2
+  direction TB
+  [*] --> DISCOVERED
+  DISCOVERED --> SKIPPED: duplicate or deny-listed
+  DISCOVERED --> SCRIPTED: schema valid
+  SCRIPTED --> REJECTED: policy fail
+  SCRIPTED --> AWAITING_APPROVAL: review needed
+  SCRIPTED --> APPROVED: auto-approve
+  AWAITING_APPROVAL --> APPROVED: operator OK
+  AWAITING_APPROVAL --> EXPIRED: 6 h timeout
+  APPROVED --> RENDERING
+  RENDERING --> RENDERED: job COMPLETED
+  RENDERING --> FAILED: retries exhausted
+  RENDERED --> QA_PASSED: spec checks
+  RENDERED --> FAILED: QA fail
+  QA_PASSED --> PUBLISHING
+  PUBLISHING --> PUBLISHED: all LIVE
+  PUBLISHING --> PARTIALLY_PUBLISHED: one failed
+  PARTIALLY_PUBLISHED --> PUBLISHING: retry
+  PUBLISHED --> [*]
+  FAILED --> [*]

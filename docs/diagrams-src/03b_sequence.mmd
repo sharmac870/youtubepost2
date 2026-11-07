@@ -1,0 +1,32 @@
+sequenceDiagram
+  autonumber
+  participant R as Render Orch.
+  participant O as OpenShorts
+  participant B as Blob
+  participant Y as YouTube API
+  participant M as Meta Graph
+  participant DB as PostgreSQL
+  R->>O: POST /api/render<br/>Idempotency-Key
+  loop backoff, max 20 min
+    R->>O: GET job status
+  end
+  O->>B: write MP4
+  R->>DB: sha256, QA = PASS
+  par YouTube Shorts
+    R->>DB: attempt = STARTED
+    R->>Y: videos.insert<br/>(resumable)
+    Y-->>R: video_id
+    R->>DB: YT = LIVE
+  and Instagram Reels
+    R->>M: POST /media<br/>REELS, resumable
+    M-->>R: container_id
+    R->>DB: save container_id
+    R->>M: upload bytes (rupload)
+    loop until FINISHED
+      R->>M: GET status_code
+    end
+    R->>M: POST /media_publish
+    M-->>R: ig_media_id
+    R->>DB: IG = LIVE
+  end
+  R->>DB: run summary + audit

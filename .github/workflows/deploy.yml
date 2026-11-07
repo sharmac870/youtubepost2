@@ -1,0 +1,25 @@
+name: Deploy
+# Manual. Builds the image in Azure (ACR Tasks) and rolls the jobs and console to it.
+# Needs OIDC federated credentials (no stored cloud secrets): repository variables AZURE_CLIENT_ID,
+# AZURE_TENANT_ID, AZURE_SUBSCRIPTION_ID for an app registration with Contributor + User Access
+# Administrator on the youtubeposts2 resource group. See README "Deploy from GitHub".
+on:
+  workflow_dispatch:
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - run: infra/deploy.sh apps-with-new-image
+        env:
+          AUTH_CLIENT_ID: ${{ vars.AUTH_CLIENT_ID }}
+          DEPLOYER_OBJECT_ID: ${{ vars.DEPLOYER_OBJECT_ID }}

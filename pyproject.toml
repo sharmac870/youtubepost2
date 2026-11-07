@@ -1,0 +1,15 @@
+[project]
+name = "youtubeposts2"
+version = "0.1.0"
+description = "India trending topics to YouTube Shorts and Instagram Reels, on Azure, at minimum cost"
+requires-python = ">=3.12"
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+src = ["src"]

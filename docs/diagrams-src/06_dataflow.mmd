@@ -1,0 +1,33 @@
+flowchart TB
+  subgraph LEG["Legend&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;"]
+    direction LR
+    l0["Untrusted / external"]
+    l1["Pipeline, private VNet"]
+    l2[("Restricted data store")]
+  end
+  src["YouTube trending metadata<br/>titles, descriptions, tags"]
+  san["Sanitiser<br/>strip URLs and control chars,<br/>length caps, wrap as data"]
+  llm["Claude API<br/><i>external processor, no training on API data</i>"]
+  val["Schema validator + policy gate"]
+  rnd["Renderer<br/>OpenShorts + licensed assets"]
+  blob[("Blob, private<br/>MP4, 30-day TTL")]
+  qa["Media QA + Publishers"]
+  plat["YouTube / Instagram<br/>public audience"]
+  kv[("Key Vault<br/>tokens, keys")]
+  db[("PostgreSQL<br/>state, audit")]
+  LEG ~~~ src
+  src -- "D1 public metadata" --> san
+  san -- "D2 delimited context" --> llm
+  llm -- "D3 ScriptJSON" --> val
+  val -- "D4 approved script" --> rnd
+  val -- "decisions" --> db
+  rnd -- "D5 MP4" --> blob
+  blob --> qa
+  kv -. "D7 secrets via managed identity,<br/>memory only, never logged" .-> qa
+  qa -- "D6 upload, TLS 1.2+" --> plat
+  classDef u fill:#FDECEA,stroke:#B3261E,color:#410E0B
+  classDef t fill:#EEF3F8,stroke:#5B7A99,color:#13263B
+  classDef r fill:#FFF4E0,stroke:#C98A1B,color:#3D2A05
+  class src,llm,plat,l0 u
+  class san,val,rnd,qa,l1 t
+  class kv,db,blob,l2 r

@@ -1,0 +1,72 @@
+erDiagram
+  PIPELINE_RUN ||--o{ TREND_CANDIDATE : discovers
+  TREND_CANDIDATE ||--o| CONTENT_ITEM : becomes
+  CONTENT_ITEM ||--o{ SCRIPT_VERSION : has
+  CONTENT_ITEM ||--o{ RENDER_JOB : renders
+  RENDER_JOB ||--o| MEDIA_ASSET : produces
+  CONTENT_ITEM ||--o{ PUBLICATION : "publishes to"
+  PUBLICATION ||--o{ PUBLISH_ATTEMPT : tries
+  CONTENT_ITEM ||--o{ AUDIT_EVENT : records
+  PLATFORM_ACCOUNT ||--o{ PUBLICATION : targets
+  PIPELINE_RUN {
+    uuid run_id PK
+    text idempotency_key UK
+    timestamptz started_at
+    text status
+  }
+  TREND_CANDIDATE {
+    uuid id PK
+    text source_video_id
+    text topic_fingerprint UK
+    bigint view_count
+    numeric velocity_score
+  }
+  CONTENT_ITEM {
+    uuid content_id PK
+    text state
+    int version
+    text approved_by
+  }
+  SCRIPT_VERSION {
+    uuid id PK
+    jsonb script_json
+    text model_id
+    text prompt_hash
+  }
+  RENDER_JOB {
+    uuid id PK
+    text engine_job_id
+    text status
+    int attempts
+  }
+  MEDIA_ASSET {
+    uuid id PK
+    text blob_uri
+    char sha256
+    int duration_ms
+  }
+  PUBLICATION {
+    uuid id PK
+    text platform
+    text platform_media_id
+    text state
+  }
+  PUBLISH_ATTEMPT {
+    uuid id PK
+    int attempt_no
+    int http_status
+    text error_code
+  }
+  PLATFORM_ACCOUNT {
+    uuid id PK
+    text platform
+    text handle
+    text secret_ref
+    timestamptz token_expires_at
+  }
+  AUDIT_EVENT {
+    bigint id PK
+    text actor
+    text action
+    jsonb details
+  }

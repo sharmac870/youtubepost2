@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Trending Posts Console</title>
+  <link rel="icon" href="/static/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/static/styles.css">
+  <script src="/static/app.js" defer></script>
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M4 18 9 12l4 3 7-9" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <span>Trending Posts</span>
+    </div>
+    <nav class="tabs" role="tablist">
+      <button role="tab" data-view="dashboard" aria-selected="true">Dashboard</button>
+      <button role="tab" data-view="review">Review <span class="count" id="review-count"></span></button>
+      <button role="tab" data-view="posts">All posts</button>
+      <button role="tab" data-view="health">Health &amp; settings</button>
+    </nav>
+    <div class="who" id="who"></div>
+  </header>
+  <div class="banner" id="banner" hidden></div>
+  <main id="main" aria-live="polite"></main>
+  <div class="drawer" id="drawer" hidden>
+    <div class="drawer-backdrop" data-close></div>
+    <aside class="drawer-panel" role="dialog" aria-modal="true" aria-labelledby="drawer-title">
+      <button class="icon-btn close" data-close aria-label="Close">✕</button>
+      <div id="drawer-body"></div>
+    </aside>
+  </div>
+  <div class="toast" id="toast" role="status" hidden></div>
+  <div class="tooltip" id="tooltip" role="tooltip" hidden></div>
+</body>
+</html>

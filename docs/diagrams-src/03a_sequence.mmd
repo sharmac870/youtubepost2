@@ -1,0 +1,26 @@
+sequenceDiagram
+  autonumber
+  participant S as Scheduler
+  participant D as Discovery
+  participant Y as YouTube API
+  participant DB as PostgreSQL
+  participant L as Claude API
+  participant P as PolicyGate
+  S->>D: start run<br/>key = date + slot
+  D->>DB: claim run (unique key)
+  D->>Y: videos.list<br/>mostPopular, IN
+  Y-->>D: trending items<br/>(untrusted)
+  D->>DB: upsert candidates,<br/>dedupe fingerprint
+  D->>L: sanitised trend context
+  L-->>D: ScriptJSON
+  D->>D: validate schema
+  D->>P: evaluate(script)
+  alt rejected
+    P->>DB: REJECTED + reason
+  else review required
+    P->>DB: AWAITING_APPROVAL
+    Note over P,DB: operator approves<br/>in Review Console
+  else auto-approved
+    P->>DB: APPROVED
+  end
+  P->>DB: outbox: render job
