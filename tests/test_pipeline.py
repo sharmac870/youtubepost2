@@ -184,3 +184,18 @@ def test_expired_drafts_and_edit_flow(pipeline, rt):
     item = rt.repo.item(cid)
     assert item["state"] == State.AWAITING_APPROVAL and item["script_version"] == 2
     assert script.title.startswith("A sharper")
+
+
+def test_switching_a_platform_off_releases_items_waiting_on_it(pipeline, rt):
+    items = run_to_approval(pipeline, rt, key="2026-11-07-slot9")
+    cid = items[0]["PartitionKey"]
+    rt.repo.set_flag("credential_INSTAGRAM", "REVOKED", "test")
+    pipeline.approve(cid, "reviewer@example.com")
+    pipeline.work(ALL_QUEUES)
+    assert rt.repo.item(cid)["state"] == State.PUBLISHING          # YouTube live, Instagram stuck
+    assert rt.repo.pub(cid, "YOUTUBE")["state"] == PubState.LIVE
+    rt.settings.platforms = ["YOUTUBE"]
+    pipeline.sweep()
+    assert rt.repo.item(cid)["state"] == State.PUBLISHED
+    # The deferred Instagram message is dropped instead of retried, and nothing is posted there.
+    assert rt.repo.pub(cid, "INSTAGRAM")["state"] != PubState.LIVE

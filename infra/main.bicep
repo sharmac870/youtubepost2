@@ -32,7 +32,7 @@ param authClientId string = ''
 param allowedUsers string = ''
 
 @description('Comma-separated platforms to publish to.')
-param platforms string = 'YOUTUBE,INSTAGRAM'
+param platforms string = 'YOUTUBE'
 
 @description('Instagram professional account id (optional: looked up from the token when empty).')
 param igUserId string = ''

@@ -58,7 +58,7 @@ deploy() {   # $1 = deployApps, $2 = image
   local name="ytp2-base"; [[ "$1" == "true" ]] && name="ytp2-apps"
   az deployment group create -g "$RESOURCE_GROUP" -n "$name" -f "$ROOT/infra/main.bicep" \
     -p deployerObjectId="$(deployer)" deployApps="$1" image="${2:-}" authClientId="${AUTH_CLIENT_ID:-}" \
-       allowedUsers="$(allowed_users)" platforms="${PLATFORMS:-YOUTUBE,INSTAGRAM}" igUserId="${IG_USER_ID:-}" \
+       allowedUsers="$(allowed_users)" platforms="${PLATFORMS:-YOUTUBE}" igUserId="${IG_USER_ID:-}" \
        igApiHost="${IG_API_HOST:-graph.instagram.com}" anthropicModel="${ANTHROPIC_MODEL:-claude-haiku-5-5}" \
     --query properties.outputs -o json
 }

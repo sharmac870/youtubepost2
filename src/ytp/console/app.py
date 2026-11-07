@@ -430,7 +430,7 @@ def health(u: dict = Depends(user)):
         "kill_switch": bool(flags.get("kill_switch", s.publish_kill_switch)),
         "auto_approve_categories": flags.get("auto_approve_categories", s.auto_approve_categories),
         "yt_privacy_status": flags.get("yt_privacy_status", s.yt_privacy_status),
-        "credentials": {p: flags.get(f"credential_{p}", "OK") for p in ("YOUTUBE", "INSTAGRAM")},
+        "credentials": {p: flags.get(f"credential_{p}", "OK") for p in s.platforms},
         "quota": {"used": repo.ledger(quota_day(), "youtube_units"), "limit": s.yt_daily_quota_units,
                   "stop_pct": s.yt_quota_stop_pct, "day": quota_day()},
         "spend": {"inr": round(repo.ledger(ist_day(), "spend_inr"), 2), "cap_inr": s.daily_spend_cap_inr,

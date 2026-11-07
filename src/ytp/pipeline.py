@@ -99,7 +99,9 @@ class Pipeline:
         return str(self.repo.flag("yt_privacy_status", self.s.yt_privacy_status))
 
     def enabled_platforms(self, item: dict) -> list[str]:
-        return [p for p in (item.get("platforms") or "").split(",") if p]
+        """The item's platforms that are still switched on (PLATFORMS). Items created while a platform was on
+        stop waiting for it once it is switched off."""
+        return [p for p in (item.get("platforms") or "").split(",") if p and p in self.s.platforms]
 
     def script_of(self, content_id: str, item: dict | None = None) -> ScriptJSON:
         item = item or self.repo.item(content_id) or {}
@@ -305,6 +307,9 @@ class Pipeline:
             if pub and pub["state"] == PubState.LIVE:
                 self.finalize(cid)
             raise StaleState(f"{cid} {platform} already {pub and pub['state']}")
+        if platform not in self.s.platforms:
+            self.finalize(cid)
+            raise StaleState(f"{cid}: publishing to {platform} is switched off (PLATFORMS)")
         # Fail closed: kill switch, revoked credential, missing QA all stop publishing.
         if self.kill_switch():
             raise Defer("kill switch is on", 900)
@@ -512,6 +517,8 @@ class Pipeline:
                     expired += 1
                 except StaleState:
                     pass
+            elif item["state"] in (State.PUBLISHING, State.PARTIALLY_PUBLISHED):
+                self.finalize(item["PartitionKey"])   # settles items left waiting on a platform now switched off
         refreshed = self.refresh_metrics()
         channel = self.refresh_channel()
         return {"relayed": relayed, "expired": expired, "metrics": refreshed, "channel": channel}
