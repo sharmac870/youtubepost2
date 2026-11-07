@@ -154,7 +154,7 @@ resource registry 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
   name: names.registry
   location: location
   sku: { name: 'Basic' }
-  properties: { adminUserEnabled: false, anonymousPullEnabled: false }
+  properties: { adminUserEnabled: false }
 }
 
 resource logs 'Microsoft.OperationalInsights/workspaces@2023-09-01' = {
@@ -180,19 +180,19 @@ resource consoleId 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31'
 }
 
 var storageGrants = [
-  { principal: workerId.properties.principalId, role: roles.blobContributor }
-  { principal: workerId.properties.principalId, role: roles.queueContributor }
-  { principal: workerId.properties.principalId, role: roles.tableContributor }
-  { principal: consoleId.properties.principalId, role: roles.blobReader }
-  { principal: consoleId.properties.principalId, role: roles.queueContributor }
-  { principal: consoleId.properties.principalId, role: roles.tableContributor }
+  { who: 'worker', role: roles.blobContributor }
+  { who: 'worker', role: roles.queueContributor }
+  { who: 'worker', role: roles.tableContributor }
+  { who: 'console', role: roles.blobReader }
+  { who: 'console', role: roles.queueContributor }
+  { who: 'console', role: roles.tableContributor }
 ]
 
 resource storageRoles 'Microsoft.Authorization/roleAssignments@2022-04-01' = [for g in storageGrants: {
   scope: storage
-  name: guid(storage.id, g.principal, g.role)
+  name: guid(storage.id, g.who == 'worker' ? workerId.id : consoleId.id, g.role)
   properties: {
-    principalId: g.principal
+    principalId: g.who == 'worker' ? workerId.properties.principalId : consoleId.properties.principalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', g.role)
   }
@@ -219,11 +219,11 @@ resource deployerSecrets 'Microsoft.Authorization/roleAssignments@2022-04-01' = 
   }
 }
 
-resource pulls 'Microsoft.Authorization/roleAssignments@2022-04-01' = [for p in [workerId.properties.principalId, consoleId.properties.principalId]: {
+resource pulls 'Microsoft.Authorization/roleAssignments@2022-04-01' = [for who in ['worker', 'console']: {
   scope: registry
-  name: guid(registry.id, p, roles.acrPull)
+  name: guid(registry.id, who == 'worker' ? workerId.id : consoleId.id, roles.acrPull)
   properties: {
-    principalId: p
+    principalId: who == 'worker' ? workerId.properties.principalId : consoleId.properties.principalId
     principalType: 'ServicePrincipal'
     roleDefinitionId: subscriptionResourceId('Microsoft.Authorization/roleDefinitions', roles.acrPull)
   }
@@ -319,7 +319,7 @@ var jobs = [
   }
 ]
 
-resource containerJobs 'Microsoft.App/jobs@2024-03-01' = [for j in jobs: if (deployApps) {
+resource containerJobs 'Microsoft.App/jobs@2025-01-01' = [for j in jobs: if (deployApps) {
   name: j.name
   location: location
   identity: { type: 'UserAssigned', userAssignedIdentities: { '${workerId.id}': {} } }
@@ -339,12 +339,12 @@ resource containerJobs 'Microsoft.App/jobs@2024-03-01' = [for j in jobs: if (dep
           minExecutions: 0
           maxExecutions: 1            // one publisher at a time: uploads are serialised per channel
           pollingInterval: 30
-          rules: [for q in j.queues: {
+          rules: map(j.queues, q => {
             name: q
             type: 'azure-queue'
             metadata: { accountName: storage.name, queueName: q, queueLength: '1' }
             identity: workerId.id
-          }]
+          })
         }
       } : null
     }
@@ -429,4 +429,4 @@ output keyVaultUri string = vault.properties.vaultUri
 output keyVaultName string = vault.name
 output registryServer string = registry.properties.loginServer
 output registryName string = registry.name
-output consoleUrl string = deployApps ? 'https://${consoleApp.properties.configuration.ingress.fqdn}' : ''
+output consoleUrl string = deployApps ? 'https://${consoleApp!.properties.configuration.ingress.fqdn}' : ''
