@@ -64,11 +64,31 @@ def test_create_from_theme_through_the_console(tmp_path, monkeypatch):
     assert "requested from theme" in actions
 
 
-def test_theme_with_no_coverage_or_on_the_deny_list_creates_nothing(pipeline, rt):
-    assert pipeline.discover_theme({"run_key": "t1", "theme": "quantum gardening tips"})["status"] == "not_found"
+def test_theme_on_the_deny_list_creates_nothing(pipeline, rt):
     assert pipeline.discover_theme({"run_key": "t2", "theme": "exit poll results"})["status"] == "denied"
     assert rt.repo.items() == []
-    assert {r["RowKey"]: r["status"] for r in rt.repo.runs()} == {"t1": "FAILED", "t2": "SKIPPED"}
+
+
+def test_theme_with_no_recent_news_is_still_written_from_the_theme(pipeline, rt):
+    assert pipeline.discover_theme({"run_key": "t1", "theme": "quantum gardening tips"})["status"] == "ok"
+    [item] = rt.repo.items()
+    trend = rt.repo.json_row(item["PartitionKey"], "trend")
+    assert trend["origin"] == "theme" and trend["news"] == [] and trend["title"] == "quantum gardening tips"
+    [event] = [e for e in rt.repo.audit_events(item["PartitionKey"]) if e["action"] == "requested from theme"]
+    assert {r["RowKey"]: r["status"] for r in rt.repo.runs()} == {"t1": "SUCCEEDED"}
+    pipeline.work(ALL_QUEUES)                                  # scripted and waiting for review like any draft
+    assert rt.repo.items()[0]["state"] == State.AWAITING_APPROVAL
+
+
+def test_a_theme_typed_as_a_sentence_is_searched_by_its_key_words():
+    from ytp.discovery.stories import theme_niche, theme_queries
+
+    long = "Scrap through whole of India YouTube and see top trending Diwali video and on basis of that make a short"
+    assert theme_queries(long) == ("India Diwali",)
+    assert theme_queries("Gold price jump before Dhanteras in Mumbai markets this week")[:2] == (
+        "Gold price jump before", "Gold price")
+    assert theme_queries("Monsoon arrival")[0] == "Monsoon arrival"
+    assert theme_niche(long, ["diwali sales"]).queries == ("diwali sales",)
 
 
 def test_clustering_keeps_different_events_apart():

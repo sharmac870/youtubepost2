@@ -368,8 +368,35 @@ class StoryFinder:
         return ""
 
 
+# Words people use to ask for something rather than to name it ("search YouTube for the top trending Diwali video
+# and make a short"): left out of a theme's news searches, which work best as a few plain keywords.
+THEME_FILLER = set("""
+scrap scrape search find look see check make create get give write show use based base video videos short shorts
+reel reels clip youtube instagram trending trend top latest viral popular whole entire across through please want
+like some any every one two three also then there here such very really today tonight topic theme content post
+basis week month year
+""".split())
+
+
+def theme_queries(theme: str, limit: int = 3) -> tuple[str, ...]:
+    """News searches for a theme typed as a sentence: its key words, most specific first."""
+    words: list[str] = []
+    for w in re.findall(r"[A-Za-z0-9][A-Za-z0-9\-']+", theme):
+        lw = w.lower()
+        if lw in STOPWORDS or lw in THEME_FILLER or len(lw) < 3 or lw in (x.lower() for x in words):
+            continue
+        words.append(w)
+    out: list[str] = []
+    for q in (" ".join(words[:4]), " ".join(words[:2]), words[0] if len(words) == 1 else ""):
+        if q and q not in out:
+            out.append(q[:80])
+    if len(theme.split()) <= 6 and theme.strip()[:80] not in out:
+        out.insert(0, theme.strip()[:80])
+    return tuple(out[:limit]) or (theme.strip()[:80],)
+
+
 def theme_niche(theme: str, terms: list[str]) -> Niche:
-    queries = tuple(t.strip()[:80] for t in terms if t.strip())[:4] or (theme.strip()[:80],)
+    queries = tuple(t.strip()[:80] for t in terms if t.strip())[:4] or theme_queries(theme)
     return Niche("theme", sanitize(theme, 40) or "Theme", queries, category_id="25", min_sources=1)
 
 

@@ -291,14 +291,20 @@ class TrendDiscoveryService:
             found = self.stories.stories(niche, hours, at, skip)
             # Prefer stories that actually share words with the theme, then the most covered.
             found.sort(key=lambda s: (overlap(words, significant_words(s.headline)) > 0, s.score), reverse=True)
-            if not found:
-                self.repo.finish_run(run_key, "FAILED", error="no recent coverage for this theme", found=0, created=0)
-                return {"status": "not_found", "run": run_key}
-            story = found[0]
-            story.article_text = self.stories.article_text(story)
-            trend = to_payload(story, at, origin="theme", theme=theme)
+            if found:
+                story = found[0]
+                story.article_text = self.stories.article_text(story)
+                trend = to_payload(story, at, origin="theme", theme=theme)
+                note = {"theme": trend.theme}
+            else:
+                # No recent news for it: the owner still asked for this, so the draft is written from the theme
+                # alone (no news sources; the policy gate sends unsourced claims to review as usual).
+                trend = TrendPayload(origin="theme", title=sanitize(theme, 200) or "Theme", channel_title="Theme",
+                                     category_id="25", published_at=at, niche="theme", theme=theme[:200],
+                                     tags=sorted(words)[:10], fingerprint=_story_fp(f"{theme} {run_key}"))
+                note = {"theme": trend.theme, "news": "none found; written from the theme alone"}
             content_id = self.repo.create_item(trend.model_dump(mode="json"), run_key, self.settings.platforms)
-            self.repo.audit(content_id, actor, "requested from theme", {"theme": trend.theme})
+            self.repo.audit(content_id, actor, "requested from theme", note)
             self.repo.mark_topic(trend.fingerprint, content_id)
             self.repo.finish_run(run_key, "SUCCEEDED", found=len(found), created=1, skipped=0)
             return {"status": "ok", "run": run_key, "created": [content_id]}
