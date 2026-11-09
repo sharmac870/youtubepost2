@@ -90,12 +90,15 @@ class LabelledRenderer(builder.Renderer):
 
 
 def plan_beats(lines: list[dict], voice: tts.Voiceover, stock: footage.Footage | None,
-               fallback: list[str]) -> list[builder.Beat]:
+               fallback: list[str], ai_clips: str = "off") -> list[builder.Beat]:
     """One beat per spoken sentence, starting exactly when the sentence starts and showing a picture chosen for
-    that sentence. Sentences longer than about 4.5 s get a second picture for their second half."""
-    beats: list[builder.Beat] = []
+    that sentence. Sentences longer than about 4.5 s get a second picture for their second half.
+
+    ai_clips: "off" = stock clips, then an AI still; "hybrid" = an AI video clip for the hook and for every
+    sentence no stock clip fits; "full" = an AI video clip for every sentence. AI clips are generated in
+    parallel after the stock pass, and any that are over budget or fail fall back to stock or a still."""
     segments = voice.segments
-    flip = False
+    plans: list[tuple[dict, list[tuple[float, float]]]] = []
     for k, (line, seg) in enumerate(zip(lines, segments)):
         if line["scene"] == -2:
             continue
@@ -107,13 +110,46 @@ def plan_beats(lines: list[dict], voice: tts.Voiceover, stock: footage.Footage |
                          key=lambda x: abs(x - (start + end) / 2), default=None)
             if middle:
                 spans = [(start, middle), (middle, end)]
-        queries = line["search"] or fallback
-        first = None
+        plans.append((line, spans))
+
+    def stock_pick(line: dict, span: tuple[float, float], image_fallback: bool = True):
+        if stock is None:
+            return None
+        a, b = span
+        return stock.pick(line["say"], line["show"], line["search"] or fallback, min_seconds=min(b - a, 4.0),
+                          image_fallback=image_fallback)
+
+    video_on = stock is not None and stock.video is not None and ai_clips in ("hybrid", "full")
+    firsts: dict[int, footage.Clip | None] = {}
+    wanted: list[int] = []
+    for i, (line, spans) in enumerate(plans):
+        if video_on and (ai_clips == "full" or line["scene"] == -1):
+            wanted.append(i)   # the hook (or, in full mode, every sentence) goes straight to an AI clip
+            continue
+        firsts[i] = stock_pick(line, spans[0], image_fallback=not video_on)
+        if firsts[i] is None and video_on:
+            wanted.append(i)
+    if wanted:
+        made = stock.animate_many([(plans[i][0]["say"], plans[i][0]["show"]) for i in wanted])
+        for i, clip in zip(wanted, made):
+            if clip is None:   # over budget or failed: stock if not tried yet, then a still
+                line, spans = plans[i]
+                clip = stock.illustrate(line["say"], line["show"]) if i in firsts else stock_pick(line, spans[0])
+            firsts[i] = clip
+
+    beats: list[builder.Beat] = []
+    flip = False
+    for i, (line, spans) in enumerate(plans):
+        first = firsts.get(i)
         for n, (a, b) in enumerate(spans):
-            clip = stock.pick(line["say"], line["show"], queries, min_seconds=min(b - a, 4.0)) if stock else None
-            if clip is None and n and first is not None:
-                clip = first  # no second picture that fits: stay on the first one
-            first = first or clip
+            if n == 0:
+                clip = first
+            elif first is not None and first.provider == "fal-video":
+                clip = first   # an AI clip already shows this sentence; keep playing it
+            else:
+                clip = stock_pick(line, (a, b))
+                if clip is None and first is not None:
+                    clip = first  # no second picture that fits: stay on the first one
             offset = 0.0
             if clip and not clip.still and clip.duration > (b - a) + 1:
                 offset = min(1.5, (clip.duration - (b - a)) / 3)
@@ -127,9 +163,11 @@ def plan_beats(lines: list[dict], voice: tts.Voiceover, stock: footage.Footage |
 def render(script: ScriptJSON, category_id: str, folder: Path, voice: str, rate: str,
            max_seconds: float = 58.0, *, style: str = "footage", mascot: bool = True,
            providers: Callable[[], list] | None = None, judge: Callable[[], object] | None = None,
-           images: Callable[[], object] | None = None) -> tuple[Path, Path, float]:
-    """providers/judge/images are factories (they read secrets lazily): stock libraries, the vision check that
-    makes sure each clip fits its sentence, and the AI-image fallback. Any of them may be missing."""
+           images: Callable[[], object] | None = None, video: Callable[[], object] | None = None,
+           ai_clips: str = "off") -> tuple[Path, Path, float]:
+    """providers/judge/images/video are factories (they read secrets lazily): stock libraries, the vision check
+    that makes sure each clip fits its sentence, the AI-image fallback and AI video clips. Any of them may be
+    missing. ai_clips: off | hybrid | full (see plan_beats)."""
     folder.mkdir(parents=True, exist_ok=True)
     rs = RenderScript.of(script)
     modern = style != "classic"
@@ -156,8 +194,9 @@ def render(script: ScriptJSON, category_id: str, folder: Path, voice: str, rate:
     options: dict = {}
     if modern:
         stock = None
-        found, judge_, images_ = [], None, None
-        for name, make in (("stock footage", providers), ("vision check", judge), ("AI images", images)):
+        found, judge_, images_, video_ = [], None, None, None
+        for name, make in (("stock footage", providers), ("vision check", judge), ("AI images", images),
+                           ("AI clips", video if ai_clips != "off" else None)):
             try:
                 value = make() if make else None
             except Exception as exc:  # noqa: BLE001 - a missing key just turns that part off
@@ -167,16 +206,20 @@ def render(script: ScriptJSON, category_id: str, folder: Path, voice: str, rate:
                 found = value or []
             elif name == "vision check":
                 judge_ = value
-            else:
+            elif name == "AI images":
                 images_ = value
-        if found or images_ is not None:
+            else:
+                video_ = value
+        if found or images_ is not None or video_ is not None:
             portrait = getattr(rs, "format", "short") != "video"
-            stock = footage.Footage(found, folder / "clips", portrait=portrait, judge=judge_, images=images_)
-        beats = plan_beats(lines, spoken, stock, rs.tags[:2])
+            stock = footage.Footage(found, folder / "clips", portrait=portrait, judge=judge_, images=images_,
+                                    video=video_)
+        beats = plan_beats(lines, spoken, stock, rs.tags[:2], ai_clips)
         if stock is not None:
             stock.write_credits(folder / "credits.json")
-            log.info("visuals: %d for %d beats (vision tokens %s, AI images %s)", len(stock.credits), len(beats),
-                     getattr(judge_, "tokens", "-"), getattr(images_, "count", "-"))
+            log.info("visuals: %d for %d beats (vision tokens %s, AI images %s, AI clips %s for $%.2f)",
+                     len(stock.credits), len(beats), getattr(judge_, "tokens", "-"), getattr(images_, "count", "-"),
+                     getattr(video_, "count", "-"), getattr(video_, "spent", 0.0))
         options = {"beats": beats, "mascot": mascot, "modern": True}
     video = builder.render(rs, spoken, look, folder / "video.mp4", theme, LabelledRenderer, **options)
     thumb = builder.thumbnail(rs, spoken, look, folder / "preview.jpg", theme, LabelledRenderer, **options)

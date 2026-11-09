@@ -84,6 +84,16 @@ class Settings(BaseSettings):
     # AI image (about $0.003) for sentences no clip fits; without it they get the caption card.
     footage_vision_check: bool = True
     footage_min_score: int = Field(6, ge=0, le=10)
+    # AI video clips (fal.ai image-to-video, needs fal-api-key): generated on demand, one paid request per clip,
+    # no GPU or anything else running between videos. off = never; hybrid = the hook sentence plus any sentence no
+    # stock clip fits; full = every sentence. Capped per video and per IST day (ledger key ai_video_usd); a clip
+    # over either cap falls back to stock footage or a still image. Set video_price_per_s to the model's price.
+    ai_clips: Literal["off", "hybrid", "full"] = "hybrid"
+    video_model: str = "fal-ai/kling-video/v2.5-turbo/pro/image-to-video"
+    video_clip_seconds: int = Field(5, ge=2, le=10)
+    video_price_per_s: float = 0.07
+    ai_clip_max_usd_per_video: float = 1.20
+    ai_clip_daily_usd: float = 6.0
     render_timeout_s: int = 1200
     max_video_seconds: float = 58.0
 

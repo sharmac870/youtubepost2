@@ -102,8 +102,21 @@ def default_services(rt: Runtime) -> Services:
         key = sec.get("fal-api-key", required=False)
         return FalImages(key) if key else None
 
+    def video():
+        key = sec.get("fal-api-key", required=False)
+        if not key or s.ai_clips == "off":
+            return None
+        from .common.repo import ist_day
+        from .render.engine.footage import FalImages, FalVideo
+
+        day = ist_day()
+        return FalVideo(key, FalImages(key), s.video_model, s.video_clip_seconds, s.video_price_per_s,
+                        s.ai_clip_max_usd_per_video,
+                        budget_left=lambda: s.ai_clip_daily_usd - repo.ledger(day, "ai_video_usd"),
+                        on_spend=lambda usd: repo.ledger_add(day, "ai_video_usd", usd))
+
     renderer = functools.partial(engine.render, style=s.render_style, mascot=s.mascot, providers=stock,
-                                 judge=judge, images=images)
+                                 judge=judge, images=images, video=video, ai_clips=s.ai_clips)
 
     return Services(trends=lambda: YouTubeTrends(sec.get("youtube-api-key")),
                     news=lambda: GoogleNews() if s.news_context else None, llm=llm, renderer=renderer,
@@ -296,6 +309,9 @@ class Pipeline:
                 clips = json.loads(credits_file.read_text())
                 if clips:
                     render["licence_ref"] = "stock footage (Pexels/Pixabay licence); synthesized music"
+                    if any(c["provider"] == "fal-video" for c in clips):
+                        render["licence_ref"] = ("stock footage (Pexels/Pixabay licence), AI-generated clips "
+                                                 "(fal.ai); synthesized music")
                     render["clips"] = [{"provider": c["provider"], "id": c["id"], "url": c["url"]} for c in clips][:40]
             report = self.services.qa(Path(video), max_seconds=90)
         return render, report

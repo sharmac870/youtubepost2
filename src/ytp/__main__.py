@@ -11,7 +11,8 @@
   render-sample [--out DIR] [--style footage|classic]
                              render one sample Short on this machine; nothing is stored or published.
                              Env: PEXELS_API_KEY / PIXABAY_API_KEY (clips), ANTHROPIC_API_KEY (checks each clip
-                             fits its sentence), FAL_API_KEY (optional AI images)
+                             fits its sentence), FAL_API_KEY (optional AI images, and AI video clips with
+                             --ai-clips hybrid|full, which are paid per clip)
 """
 from __future__ import annotations
 
@@ -50,6 +51,7 @@ def main(argv: list[str] | None = None) -> int:
     rs.add_argument("--out", default="sample-render")
     rs.add_argument("--style", choices=["footage", "classic"], default="footage")
     rs.add_argument("--no-mascot", action="store_true")
+    rs.add_argument("--ai-clips", choices=["off", "hybrid", "full"], default="off")
     args = parser.parse_args(argv)
 
     settings = get_settings()
@@ -73,7 +75,7 @@ def main(argv: list[str] | None = None) -> int:
         from .common.models import ScriptJSON
         from .fakes import sample_script
         from .render import engine
-        from .render.engine.footage import ClaudeJudge, FalImages, providers_from
+        from .render.engine.footage import ClaudeJudge, FalImages, FalVideo, providers_from
 
         def judge():
             key = os.environ.get("ANTHROPIC_API_KEY", "")
@@ -88,7 +90,11 @@ def main(argv: list[str] | None = None) -> int:
             script, "25", Path(args.out), settings.tts_voice, settings.tts_rate, settings.max_video_seconds,
             style=args.style, mascot=not args.no_mascot,
             providers=lambda: providers_from(os.environ.get("PEXELS_API_KEY", ""), os.environ.get("PIXABAY_API_KEY", "")),
-            judge=judge, images=lambda: FalImages(os.environ["FAL_API_KEY"]) if os.environ.get("FAL_API_KEY") else None)
+            judge=judge, images=lambda: FalImages(os.environ["FAL_API_KEY"]) if os.environ.get("FAL_API_KEY") else None,
+            video=lambda: FalVideo(os.environ["FAL_API_KEY"], FalImages(os.environ["FAL_API_KEY"]), settings.video_model,
+                                   settings.video_clip_seconds, settings.video_price_per_s,
+                                   settings.ai_clip_max_usd_per_video) if os.environ.get("FAL_API_KEY") else None,
+            ai_clips=args.ai_clips)
         print(f"{video} ({seconds} s)")
         return 0
     if args.command == "set-secret":

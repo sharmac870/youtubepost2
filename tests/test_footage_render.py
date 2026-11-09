@@ -191,8 +191,8 @@ def test_footage_render_cuts_to_each_sentences_picture_exactly_when_it_is_spoken
     planned = {}
     real_plan = engine.plan_beats
 
-    def spy(lines, voice, stock, fallback):
-        beats = real_plan(lines, voice, _no_download(stock), fallback)
+    def spy(lines, voice, stock, fallback, *rest):
+        beats = real_plan(lines, voice, _no_download(stock), fallback, *rest)
         planned.update(lines=lines, voice=voice, beats=beats, credits=list(stock.credits))
         return beats
 
@@ -221,3 +221,121 @@ def test_footage_style_without_key_and_classic_style_render(tmp_path, silent_voi
     silent_voice.clear()
     video, _, _ = engine.render(script, "28", tmp_path / "b", "v", "+10%", 58, style="classic")
     assert video.exists() and set(silent_voice) == {("+10%", "+0Hz")}   # classic voice is unchanged
+
+
+def _fal_transport(calls, fail_video=False):
+    def handler(request):
+        url = str(request.url)
+        calls.append(url)
+        if "flux" in url:
+            return httpx.Response(200, json={"images": [{"url": "https://cdn/key.jpg"}]})
+        if url == "https://cdn/key.jpg":
+            import io
+
+            from PIL import Image
+
+            buf = io.BytesIO()
+            Image.new("RGB", (32, 48), (0, 90, 200)).save(buf, "JPEG")
+            return httpx.Response(200, content=buf.getvalue())
+        if "kling" in url:
+            assert request.headers["Authorization"] == "Key k"
+            body = json.loads(request.content)
+            assert body["image_url"] == "https://cdn/key.jpg" and body["duration"] == "5"
+            assert "no recognisable real person" in body["prompt"]
+            if fail_video:
+                return httpx.Response(500, json={"detail": "boom"})
+            return httpx.Response(200, json={"video": {"url": "https://cdn/clip.mp4"}})
+        if url == "https://cdn/clip.mp4":
+            return httpx.Response(200, content=b"mp4")
+        return httpx.Response(404)
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def test_fal_video_animates_a_keyframe_and_respects_the_per_video_cap(tmp_path):
+    calls, spent = [], []
+    http = _fal_transport(calls)
+    video = footage.FalVideo("k", footage.FalImages("k", http), "fal-ai/kling-video/v2.5-turbo/pro/image-to-video",
+                             price_per_s=0.07, max_usd=0.75, on_spend=spent.append, http=http)
+    clip = video.animate("a hand tapping Pay on a phone", True, tmp_path)
+    assert clip.provider == "fal-video" and not clip.still and Path(clip.path).read_bytes() == b"mp4"
+    assert clip.duration == 5 and spent == [0.35]
+    again = video.animate("a hand tapping Pay on a phone", True, tmp_path)   # same prompt: cached, free
+    assert again.path == clip.path and spent == [0.35]
+    assert video.animate("a second picture", True, tmp_path) is not None     # 0.70 <= 0.75
+    assert video.animate("a third picture", True, tmp_path) is None          # would pass the cap: not requested
+    assert sum("kling" in c for c in calls) == 2 and video.spent == 0.70
+
+
+def test_fal_video_respects_the_daily_cap_and_refunds_failures(tmp_path):
+    calls = []
+    http = _fal_transport(calls, fail_video=True)
+    video = footage.FalVideo("k", footage.FalImages("k", http), "fal-ai/kling-video", max_usd=5,
+                             budget_left=lambda: 0.4, http=http)
+    with pytest.raises(httpx.HTTPStatusError):
+        video.animate("x", True, tmp_path)
+    assert video.spent == 0 and video._pending == 0
+    video.budget_left = lambda: 0.2
+    assert video.animate("y", True, tmp_path) is None and not any("flux" in c for c in calls[3:])
+
+
+class FakeVideo:
+    def __init__(self, budget=99):
+        self.asked, self.budget = [], budget
+
+    def animate(self, prompt, portrait, cache):
+        self.asked.append(prompt)
+        if len(self.asked) > self.budget:
+            return None
+        return footage.Clip("fal-video", f"v{len(self.asked)}", "", "", 0, 0, 5.0, path=f"/v/{len(self.asked)}.mp4")
+
+
+class Stills:
+    def generate(self, prompt, portrait, cache):
+        return footage.Clip("fal-flux", "img", "", "", 0, 0, 0.0, path=str(cache / "still.jpg"))
+
+
+def _plan(tmp_path, mode, video, library_ok=True, silent=None):
+    s = ScriptJSON.model_validate(sample_script("UPI limits"))
+    lines = engine.RenderScript.of(s).lines()
+    words_per = [max(1.0, len(line["say"].split()) * 0.33) for line in lines]
+    segments, t = [], 0.0
+    for n, (line, d) in enumerate(zip(lines, words_per)):
+        words = [tts.Word(w.text, w.start + t, w.end + t) for w in tts.estimate_words(line["say"], d)]
+        segments.append(tts.Segment(n, line["say"], t, t + d, words))
+        t += d + 0.2
+    voice = tts.Voiceover(tmp_path / "v.wav", t, segments)
+
+    class Judge:
+        min_score = 6
+
+        def rank(self, say, show, clips):   # only the "family" sentence has a fitting stock clip
+            return [(i, 9 if "family" in show and library_ok else 1) for i in range(len(clips))]
+
+    stock = _no_download(footage.Footage([Library()], tmp_path, judge=Judge(), images=Stills(), video=video))
+    beats = engine.plan_beats(lines, voice, stock, [], mode)
+    return lines, beats, stock
+
+
+def test_hybrid_mode_animates_the_hook_and_sentences_without_a_stock_clip(tmp_path):
+    video = FakeVideo()
+    lines, beats, stock = _plan(tmp_path, "hybrid", video)
+    providers = [c.provider for c in stock.credits]
+    assert video.asked[0] == lines[0]["show"]                         # the hook is always an AI clip
+    assert "lib" in providers and "fal-flux" not in providers         # the family sentence keeps its stock clip
+    assert providers.count("fal-video") == len(lines) - 2             # every other sentence is animated
+    assert beats[0].clip.endswith(".mp4") and beats[0].start == 0.0
+
+
+def test_full_mode_animates_everything_and_over_budget_falls_back(tmp_path):
+    video = FakeVideo(budget=3)
+    lines, beats, stock = _plan(tmp_path, "full", video)
+    providers = [c.provider for c in stock.credits]
+    assert len(video.asked) == len(lines) - 1 and providers.count("fal-video") == 3
+    assert "lib" in providers and "fal-flux" in providers             # stock where it fits, else a still
+    assert all(b.clip for b in beats)
+
+
+def test_off_mode_never_asks_for_ai_clips(tmp_path):
+    video = FakeVideo()
+    _, _, stock = _plan(tmp_path, "off", video)
+    assert video.asked == [] and "fal-flux" in [c.provider for c in stock.credits]

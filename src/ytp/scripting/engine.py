@@ -91,13 +91,16 @@ Content rules:
   scenes the way a person's voice changes) and 1 to 3 shots; call_to_action (one line, e.g. a question to
   comment on or "follow for more").
 - Each shot: `say` is ONE short spoken sentence (max 18 words); `show` is the one picture that proves or
-  illustrates exactly that sentence, described concretely in plain words ("close-up of a hand tapping Pay on a
-  phone, payment failed message"); `search` is 2-4 plain English words to find that picture in a stock video
+  illustrates exactly that sentence, described concretely in plain words as a moving scene: the action and one
+  camera move ("slow push-in on a hand tapping Pay on a phone, a payment failed message pops up"), since it may be
+  turned into a short AI video clip; `search` is 2-4 plain English words to find that picture in a stock video
   library ("phone payment failed"). Write the sentence and its picture together: if a sentence cannot be shown
   with ordinary stock footage (people, places, objects, screens, money, traffic, crowds, nature, offices),
   rewrite the sentence so it can, or make the picture a simple visual metaphor that clearly fits it.
 - Never put a person's name, a brand logo, a channel, or anything from the trending video in show or search;
-  stock libraries only have generic footage, so describe the scene, not the specific event.
+  stock libraries only have generic footage, so describe the scene, not the specific event. Never ask for a real,
+  recognisable person (politician, actor, athlete, influencer) to be shown: show anonymous people, places and
+  objects instead.
 - Total spoken words (hook + scenes + call to action): 90 to 150.
 - title: max 90 characters, no "#Shorts" (it is added later), no ALL CAPS, no emojis.
 - description: 2-4 sentences for YouTube. caption: 1-3 sentences for Instagram. Do not add links; they are added.

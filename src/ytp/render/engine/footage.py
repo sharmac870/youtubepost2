@@ -3,8 +3,9 @@
 Keyword search alone gives loosely related clips, which makes the voice and the picture drift apart. So each
 sentence's candidates are LOOKED AT: a vision model (Claude Haiku, about a cent per video) scores every
 candidate's thumbnail against the sentence and its planned picture, and only a clip that clearly fits is used.
-When none fits, an AI image is generated for that sentence (fal.ai Flux, optional, about $0.003 each), and
-without that the sentence gets the drawn caption card rather than an unrelated clip.
+When none fits, an AI clip is generated for that sentence (fal.ai image-to-video, optional, paid per clip and
+capped per video and per day), or else an AI image (fal.ai Flux, about $0.003 each), and without those the
+sentence gets the drawn caption card rather than an unrelated clip.
 
 Both libraries are free for commercial use with no attribution required; every clip used is still recorded in
 credits.json next to the render (and in the render's licence_ref) so its source can be shown on request.
@@ -19,7 +20,9 @@ import hashlib
 import json
 import logging
 import subprocess
+import threading
 from collections.abc import Callable
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -123,6 +126,7 @@ class Footage:
     http: httpx.Client | None = None
     judge: object | None = None       # ClaudeJudge; None = keyword order only
     images: object | None = None      # FalImages; None = no AI-image fallback
+    video: object | None = None       # FalVideo; None = no AI clips
     _results: dict = field(default_factory=dict)
 
     def candidates(self, queries: list[str], min_seconds: float, limit: int = 8) -> list[Clip]:
@@ -146,9 +150,11 @@ class Footage:
                         return out
         return out
 
-    def pick(self, say: str, show: str, queries: list[str], min_seconds: float = 2.0) -> Clip | None:
-        """The visual for one sentence: the best stock clip that clearly shows it, else an AI image of it,
-        else None (the renderer then shows the caption card instead of something unrelated)."""
+    def pick(self, say: str, show: str, queries: list[str], min_seconds: float = 2.0,
+             image_fallback: bool = True) -> Clip | None:
+        """The visual for one sentence: the best stock clip that clearly shows it, else an AI image of it
+        (unless image_fallback is off), else None (the renderer then shows the caption card instead of
+        something unrelated)."""
         queries = [q for q in queries if q]
         clips = self.candidates(queries, min_seconds) if queries else []
         if clips and self.judge is not None:
@@ -166,17 +172,43 @@ class Footage:
                 self.used.add((clip.provider, clip.id))
                 self.credits.append(clip)
                 return clip
-        if self.images is not None and (show or say):
+        return self.illustrate(say, show) if image_fallback else None
+
+    def illustrate(self, say: str, show: str) -> Clip | None:
+        """An AI still image of the sentence's picture, or None."""
+        if self.images is None or not (show or say):
+            return None
+        try:
+            image = self.images.generate(show or say, self.portrait, self.cache)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("image generation failed: %s", exc)
+            return None
+        if image is not None:
+            image.said = say
+            self.credits.append(image)
+        return image
+
+    def animate_many(self, wanted: list[tuple[str, str]], workers: int = 6) -> list[Clip | None]:
+        """AI clips for several (sentence, picture) pairs at once: each takes a minute or two to generate, so
+        they run in parallel. None where the budget ran out or generation failed."""
+        if self.video is None or not wanted:
+            return [None] * len(wanted)
+
+        def one(pair: tuple[str, str]) -> Clip | None:
+            say, show = pair
             try:
-                image = self.images.generate(show or say, self.portrait, self.cache)
-            except Exception as exc:  # noqa: BLE001
-                log.warning("image generation failed: %s", exc)
-                image = None
-            if image is not None:
-                image.said = say
-                self.credits.append(image)
-                return image
-        return None
+                return self.video.animate(show or say, self.portrait, self.cache)
+            except Exception as exc:  # noqa: BLE001 - a failed clip falls back to stock or a still
+                log.warning("AI clip failed for %r: %s", say[:40], exc)
+                return None
+
+        with ThreadPoolExecutor(max_workers=max(1, min(workers, len(wanted)))) as pool:
+            made = list(pool.map(one, wanted))
+        for (say, _), clip in zip(wanted, made):
+            if clip is not None:
+                clip.said = say
+                self.credits.append(clip)
+        return made
 
     def download(self, clip: Clip) -> bool:
         self.cache.mkdir(parents=True, exist_ok=True)
@@ -302,6 +334,92 @@ class FalImages:
         Image.open(__import__("io").BytesIO(img.content)).convert("RGB").save(path, quality=92)
         self.count += 1
         return Clip("fal-flux", path.stem, "", url, 0, 0, 0.0, "AI-generated", prompt[:60], str(path))
+
+
+class FalVideo:
+    """A short AI video clip for one sentence (fal.ai image-to-video). Nothing runs or costs anything between
+    videos: each clip is one paid request. A Flux keyframe of the sentence's picture is made first and then
+    animated, which keeps one look across a video and wastes fewer generations than text-to-video.
+
+    Spend is capped per video (max_usd) and per day (budget_left, read from the ledger); a clip that would go
+    over either cap is not requested and the sentence falls back to stock footage or a still image."""
+
+    BASE = "https://fal.run/"
+    MOTION = (". Smooth natural motion, realistic, cinematic vertical shot, no text, no logos, no watermark, "
+              "no recognisable real person.")
+
+    def __init__(self, api_key: str, images, model: str, seconds: int = 5, price_per_s: float = 0.07,
+                 max_usd: float = 1.2, budget_left: Callable[[], float] | None = None,
+                 on_spend: Callable[[float], None] | None = None, http: httpx.Client | None = None):
+        self.key = api_key
+        self.images = images          # FalImages, for the keyframe
+        self.model = model.strip("/")
+        self.seconds = seconds
+        self.price_per_s = price_per_s
+        self.max_usd = max_usd
+        self.budget_left = budget_left
+        self.on_spend = on_spend
+        self.http = http or httpx.Client(timeout=600, follow_redirects=True)
+        self.spent = 0.0              # this video: reserved and paid
+        self.count = 0
+        self._pending = 0.0           # reserved but not yet written to the daily ledger
+        self._lock = threading.Lock()
+
+    @property
+    def clip_usd(self) -> float:
+        return round(self.seconds * self.price_per_s, 4)
+
+    def _reserve(self) -> bool:
+        cost = self.clip_usd
+        with self._lock:
+            if self.spent + cost > self.max_usd + 1e-9:
+                return False
+            if self.budget_left is not None and self.budget_left() - self._pending < cost - 1e-9:
+                return False
+            self.spent += cost
+            self._pending += cost
+            return True
+
+    def _release(self, paid: bool) -> None:
+        cost = self.clip_usd
+        with self._lock:
+            self._pending -= cost
+            if not paid:
+                self.spent -= cost
+
+    def animate(self, prompt: str, portrait: bool, cache: Path) -> Clip | None:
+        cache.mkdir(parents=True, exist_ok=True)
+        path = cache / f"aiv-{hashlib.sha1(f'{self.model}|{prompt}'.encode()).hexdigest()[:16]}.mp4"
+        if path.exists():
+            return Clip("fal-video", path.stem, "", "", 0, 0, float(self.seconds), "AI-generated", prompt[:60],
+                        str(path))
+        if not self._reserve():
+            log.info("AI clip skipped: video cap $%.2f or daily cap reached", self.max_usd)
+            return None
+        try:
+            keyframe = self.images.generate(prompt, portrait, cache)
+            if keyframe is None or not keyframe.file_url:
+                self._release(paid=False)
+                return None
+            r = self.http.post(self.BASE + self.model, headers={"Authorization": f"Key {self.key}"},
+                               json={"prompt": prompt[:400] + self.MOTION, "image_url": keyframe.file_url,
+                                     "duration": str(self.seconds)})
+            r.raise_for_status()
+            url = (r.json().get("video") or {}).get("url")
+            if not url:
+                raise ValueError("no video in the response")
+        except Exception:
+            self._release(paid=False)
+            raise
+        self._release(paid=True)       # the clip is generated, so it is billed
+        if self.on_spend:
+            self.on_spend(self.clip_usd)
+        self.count += 1
+        video = self.http.get(url)
+        video.raise_for_status()
+        path.write_bytes(video.content)
+        return Clip("fal-video", path.stem, "", url, 0, 0, float(self.seconds), "AI-generated", prompt[:60],
+                    str(path))
 
 
 def providers_from(pexels_key: str = "", pixabay_key: str = "") -> list:
