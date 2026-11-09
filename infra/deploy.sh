@@ -60,6 +60,7 @@ deploy() {   # $1 = deployApps, $2 = image
     -p deployerObjectId="$(deployer)" deployApps="$1" image="${2:-}" authClientId="${AUTH_CLIENT_ID:-}" \
        allowedUsers="$(allowed_users)" platforms="${PLATFORMS:-YOUTUBE}" igUserId="${IG_USER_ID:-}" \
        igApiHost="${IG_API_HOST:-graph.instagram.com}" anthropicModel="${ANTHROPIC_MODEL:-claude-haiku-5-5}" \
+       discoverySchedule="${DISCOVERY_SCHEDULE:-false}" \
     --query properties.outputs -o json
 }
 

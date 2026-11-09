@@ -46,6 +46,9 @@ param anthropicModel string = 'claude-haiku-5-5'
 @description('Discovery schedule (UTC). Default 06:00, 12:00, 18:00, 00:00 IST.')
 param discoveryCron string = '30 0,6,12,18 * * *'
 
+@description('Run discovery on the discoveryCron schedule. false = discovery only runs when started from the console (Find trends now / Create from theme).')
+param discoverySchedule bool = false
+
 var suffix = take(uniqueString(resourceGroup().id), 6)
 var names = {
   storage: 'stytp2${suffix}'
@@ -279,7 +282,7 @@ var registries = [{ server: registry.properties.loginServer, identity: workerId.
 var jobs = [
   {
     name: 'job-ytp2-discover'
-    trigger: 'Schedule'
+    trigger: discoverySchedule ? 'Schedule' : 'Manual'
     cron: discoveryCron
     args: ['discover']
     cpu: '0.5'
@@ -332,6 +335,7 @@ resource containerJobs 'Microsoft.App/jobs@2025-01-01' = [for j in jobs: if (dep
       replicaRetryLimit: 0          // retries are the queue's job (visibility timeout + dead-lettering)
       registries: registries
       scheduleTriggerConfig: j.trigger == 'Schedule' ? { cronExpression: j.cron, parallelism: 1, replicaCompletionCount: 1 } : null
+      manualTriggerConfig: j.trigger == 'Manual' ? { parallelism: 1, replicaCompletionCount: 1 } : null
       eventTriggerConfig: j.trigger == 'Event' ? {
         parallelism: 1
         replicaCompletionCount: 1
